@@ -215,37 +215,98 @@ services:
           memory: ${SWARM_CADDY_MEMORY:-128m}
 
   # ===========================================================================
-  # EXPLORER SLOT - disabled. Nothing starts it unless `--profile explorer` is
-  # passed, and the image is supplied later by workstream D as a `docker save`
-  # tarball, exactly like the zebra and zaino images: nothing is built here.
+  # EXPLORER - present and configured, but DISABLED. Nothing starts it unless
+  # `--profile explorer` is passed, and `explore.swarm.green` still resolves to
+  # the owner's previous site, so the Caddy block for it is commented out and
+  # no certificate is requested for a name this server does not serve.
   #
-  # To enable, once that artifact exists:
-  #   1. scripts/deploy.sh --explorer-image <tarball>   (scp + docker load)
-  #   2. set SWARM_EXPLORER_IMAGE and SWARM_EXPLORER_PORT in .env
-  #   3. uncomment the explore block in ./Caddyfile
-  #   4. add the explore A record at the registrar
-  #   5. docker compose --env-file .env --profile explorer up -d
+  # The image comes from brs-holding/swarm-explorer as a `docker save` tarball,
+  # exactly like the zebra and zaino images: nothing is built here.
+  #
+  # To enable:
+  #   1. scripts/deploy.sh ... --explorer-image <tarball>   (scp + docker load)
+  #   2. set SWARM_EXPLORER_IMAGE to the tag docker load printed, and
+  #      SWARM_EXPLORER_SECRET_KEY_BASE to `openssl rand -base64 64` output,
+  #      in the server-side .env (mode 0600, never in git)
+  #   3. put the three destination addresses in <config>/recipients.json
+  #   4. move the explore A record to this server
+  #   5. uncomment the explore block in ./Caddyfile
+  #   6. docker compose --env-file .env --profile explorer up -d
   # ===========================================================================
   explorer:
     profiles: ["explorer"]
     image: ${SWARM_EXPLORER_IMAGE:-swarm-explorer-image-not-configured}
+    hostname: explorer
     restart: unless-stopped
     <<: [*hardening]
     logging: *logging
+    # The same uid as the node, so the node's 0600 RPC cookie is readable here
+    # without being made world-readable. The explorer image defaults to this
+    # too; it is stated again so a future mismatch is visible in one place.
+    user: "10001:10001"
+    # An Elixir release writes nothing at runtime except to /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
-      # The explorer reads the node's JSON-RPC. It gets the same cookie the
-      # indexer does, read-only, and is never published directly.
-      SWARM_ZEBRA_RPC: zebra:${SWARM_RPC_PORT:-18232}
+      # Phoenix refuses to start without a long secret, and LiveView's origin
+      # check is derived from the hostname - if it is not exactly the name
+      # Caddy serves, pages load and the live tiles silently never connect.
+      SECRET_KEY_BASE: ${SWARM_EXPLORER_SECRET_KEY_BASE:-set-me-openssl-rand-base64-64}
+      EXPLORER_HOSTNAME: ${SWARM_EXPLORE_DOMAIN:-explore.invalid}
+      EXPLORER_SCHEME: ${SWARM_EXPLORER_SCHEME:-https}
+      EXPLORER_PORT: ${SWARM_EXPLORER_PUBLIC_PORT:-443}
       PORT: ${SWARM_EXPLORER_PORT:-4000}
+      # Upstream shipped with debug on and filled 7.2 GB of container log.
+      LOG_LEVEL: ${SWARM_EXPLORER_LOG:-info}
+
+      # It reads the node's JSON-RPC directly, with the same cookie the indexer
+      # uses, mounted read-only. It re-reads the cookie after an authentication
+      # failure, so a node restart needs no explorer restart.
+      ZEBRA_RPC_URL: http://zebra:${SWARM_RPC_PORT:-18232}
+      ZEBRA_COOKIE_PATH: /swarm/auth/.cookie
+
+      SWARM_PROJECT_NAME: SWARM
+      SWARM_NETWORK_NAME: ${SWARM_NETWORK_NAME:-SwarmTestnet}
+      SWARM_TICKER: ${SWARM_TICKER:-SWM}
+      SWARM_MAX_SUPPLY: "20999987.3152"
+      SWARM_HALVING_INTERVAL: "1680000"
+      SWARM_BLOCK_TARGET_SECONDS: "75"
+      SWARM_RECIPIENTS_FILE: /etc/swarm/recipients.json
+
+      # Sized for two shared vCPUs also carrying the node and the indexer.
+      SWARM_CACHE_LIMIT: ${SWARM_EXPLORER_CACHE_LIMIT:-1500}
+      SWARM_CACHE_TTL_MINUTES: ${SWARM_EXPLORER_CACHE_TTL_MINUTES:-15}
+      SWARM_WARMER_WINDOW: ${SWARM_EXPLORER_WARMER_WINDOW:-21}
+      SWARM_WARMER_INTERVAL_MS: ${SWARM_EXPLORER_WARMER_INTERVAL_MS:-25000}
     volumes:
       - auth:/swarm/auth:ro
+      # recipients.json lives in the rendered configuration directory, beside
+      # the manifest the three addresses come from.
+      - ${SWARM_CONFIG_DIR:-./config/live}:/etc/swarm:ro
+    # Internal only. Caddy is the only thing that talks to it, and there is no
+    # port mapping, so it is not reachable from outside the host.
+    expose:
+      - "${SWARM_EXPLORER_PORT:-4000}"
     depends_on:
+      # Deliberately `started`, not `healthy`: the explorer is built to come up
+      # before the node and to keep answering while the node is down. Its
+      # /healthz reports the node's state separately.
       zebra:
-        condition: service_healthy
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:${SWARM_EXPLORER_PORT:-4000}/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     deploy:
       resources:
         limits:
           cpus: "${SWARM_EXPLORER_CPUS:-0.5}"
+          # Measured at about 141 MiB steady state in the explorer's own CI on
+          # a short chain; a long chain with real traffic will sit higher, so
+          # this is a ceiling to watch rather than a prediction.
           memory: ${SWARM_EXPLORER_MEMORY:-768m}
         reservations:
           memory: ${SWARM_EXPLORER_MEMORY_RESERVATION:-256m}

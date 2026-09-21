@@ -60,15 +60,34 @@
 }
 
 # ---------------------------------------------------------------------------
-# EXPLORER SLOT - DISABLED.
+# EXPLORER - DISABLED.
 #
-# Uncomment this block once workstream D has supplied the explorer image, the
-# explore A record exists, and `docker compose --profile explorer up -d` is
-# running the service. Until then the name is not served at all, so no
-# certificate is requested for it and no empty page is published.
-# ---------------------------------------------------------------------------
+# `explore.swarm.green` still resolves to the owner's previous site. Until that
+# A record is moved to this server, serving the name here would take that site
+# down and ask for a certificate for something this server does not serve, so
+# the block below is commented out.
+#
+# To enable: move the A record, uncomment everything between the markers,
+# start the service with `--profile explorer`, and reload Caddy. The CI lint
+# job uncomments this block and validates it, so it is known to parse.
+#
+# The `/broadcast` handler is not optional. That path forwards a raw
+# transaction to the node's `sendrawtransaction`, which is the explorer's only
+# write path to the chain. It stays closed until there is a reason to open it,
+# and it is closed here rather than in the explorer so that reading this file
+# tells you the whole story of what is reachable from outside.
+#
+# EXPLORER-BLOCK-BEGIN
 # {$SWARM_EXPLORE_DOMAIN} {
 # 	import swarm_hsts
+# 	encode zstd gzip
 #
-# 	reverse_proxy explorer:{$SWARM_EXPLORER_PORT}
+# 	handle /broadcast* {
+# 		respond "transaction broadcast is not enabled on this server" 403
+# 	}
+#
+# 	handle {
+# 		reverse_proxy explorer:{$SWARM_EXPLORER_PORT}
+# 	}
 # }
+# EXPLORER-BLOCK-END

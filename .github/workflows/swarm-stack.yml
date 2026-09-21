@@ -174,6 +174,34 @@ jobs:
       # preload is close to irreversible. Comments are stripped first: the
       # Caddyfile explains the policy in prose, and matching that prose is how
       # this check first failed.
+      # The explorer block is commented out because the explore record still
+      # points at the owner's previous site. Commented-out configuration rots
+      # silently, so it is uncommented into a scratch file and validated too -
+      # whoever enables it should not be the one to find a typo.
+      - name: Validate the disabled explorer block
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          awk '/EXPLORER-BLOCK-BEGIN/{flag=1; next} /EXPLORER-BLOCK-END/{flag=0} flag' Caddyfile \
+            | sed 's/^# \{0,1\}//' > /tmp/explorer-block
+          if [ ! -s /tmp/explorer-block ]; then
+            echo "::error::the explorer block markers are missing from the Caddyfile"
+            exit 1
+          fi
+          cat Caddyfile /tmp/explorer-block > /tmp/Caddyfile.enabled
+          docker run --rm \
+            -v /tmp/Caddyfile.enabled:/etc/caddy/Caddyfile:ro \
+            -e SWARM_ACME_EMAIL=ops@example.invalid \
+            -e SWARM_LWD_DOMAIN=lwd.example.invalid \
+            -e SWARM_EXPLORE_DOMAIN=explore.example.invalid \
+            -e SWARM_ZAINO_GRPC_PORT=8137 \
+            -e SWARM_EXPLORER_PORT=4000 \
+            -e SWARM_HSTS_MAX_AGE=31536000 \
+            caddy:2.11-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          # The explorer's only write path to the chain must stay closed.
+          grep -q 'handle /broadcast' /tmp/explorer-block \
+            || { echo "::error::the explorer block does not block /broadcast"; exit 1; }
+
       - name: Check the HSTS policy is max-age only
         run: |
           set -euo pipefail

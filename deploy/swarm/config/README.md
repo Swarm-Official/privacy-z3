@@ -11,6 +11,14 @@ with `scripts/swarm/render_config.py`, and `scripts/deploy.sh` uploads it.
 | `zainod.toml` | zaino | the `[network.CustomTestnet]` block: the genesis and schedule the indexer verifies against the node before it opens its index |
 | `genesis.hex` | init-genesis | the serialised block submitted once into an empty database |
 | `manifest.json` | init-genesis | `genesis_hash`, which the job proves the node actually ended up with |
+| `recipients.json` | explorer (optional) | the three destination addresses and their labels, so the explorer can name the funding-stream outputs instead of printing upstream's slot names |
+
+`recipients.json` is only needed when the explorer is enabled. Its shape is in
+`example/recipients.example.json`; the addresses come from the same three
+`t2…` destinations the manifest's funding streams pay, and the labels are the
+project's (Core Development, Grants & Ecosystem, Community & Development
+Reserve), because upstream's RPC reports them as "Electric Coin Company",
+"Zcash Foundation" and "Major Grants". It holds addresses, never keys.
 
 Rules the stack relies on:
 

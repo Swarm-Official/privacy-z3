@@ -1,0 +1,20 @@
+[
+  {
+    "slot": "ECC",
+    "label": "Core Development",
+    "address": "t2REPLACE_WITH_THE_CORE_DEVELOPMENT_P2SH",
+    "percent": 8
+  },
+  {
+    "slot": "MajorGrants",
+    "label": "Grants & Ecosystem",
+    "address": "t2REPLACE_WITH_THE_GRANTS_ECOSYSTEM_P2SH",
+    "percent": 4
+  },
+  {
+    "slot": "ZcashFoundation",
+    "label": "Community & Development Reserve",
+    "address": "t2REPLACE_WITH_THE_COMMUNITY_RESERVE_P2SH",
+    "percent": 8
+  }
+]
