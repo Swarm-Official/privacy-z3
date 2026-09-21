@@ -55,7 +55,22 @@ images)
     run="${RUN_ID:-$(latest_run "${Z3_REPO}" 'SWARM server stack')}"
     [ -n "${run}" ] || die "no successful 'SWARM server stack' run in ${Z3_REPO}"
     printf 'downloading images from %s run %s\n' "${Z3_REPO}" "${run}"
-    gh run download "${run}" -R "${Z3_REPO}" -n swarm-images-x86_64-linux -D "${OUT}"
+    # The image artifact is a couple of hundred megabytes and `gh run download`
+    # has been seen to report a dropped connection and still exit zero, so the
+    # download is retried and then verified rather than trusted.
+    attempt=1
+    until [ "${attempt}" -gt "${SWARM_FETCH_ATTEMPTS:-4}" ]; do
+        gh run download "${run}" -R "${Z3_REPO}" -n swarm-images-x86_64-linux -D "${OUT}" || true
+        if [ -r "${OUT}/SHA256SUMS" ] && ( cd "${OUT}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); then
+            break
+        fi
+        printf '  attempt %s did not produce a complete artifact; retrying\n' "${attempt}"
+        rm -f "${OUT}"/swarm-*.tar.gz "${OUT}/SHA256SUMS"
+        attempt=$(( attempt + 1 ))
+        sleep 5
+    done
+    [ -r "${OUT}/SHA256SUMS" ] || die "could not download a complete image artifact from run ${run}"
+    ( cd "${OUT}" && sha256sum -c SHA256SUMS ) || die 'the downloaded images do not match SHA256SUMS'
     ;;
 
 binaries)
