@@ -32,6 +32,15 @@ case "${target}" in
         # HTTP/2 is negotiated over ALPN; a server that cannot do h2 will not
         # serve gRPC, so failing here is the right answer.
         http_args=(--http2)
+        # TEST ONLY. Let's Encrypt's staging certificates are untrusted by
+        # design, which is the whole point of testing against them, so a
+        # rehearsal needs a way to say "I know". Never set this against the
+        # production endpoint: it would turn the identity check into a check
+        # that something answered.
+        if [ "${SWARM_GRPC_INSECURE:-0}" = "1" ]; then
+            printf 'swarm-lightd-info: TLS verification disabled (SWARM_GRPC_INSECURE=1)\n' >&2
+            http_args+=(--insecure)
+        fi
         ;;
     *)
         printf 'swarm-lightd-info: target must start with h2c://, http:// or https://\n' >&2

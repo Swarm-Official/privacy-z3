@@ -149,29 +149,31 @@ fi
 # Windows editors and PowerShell redirection leave CRLF and byte-order marks
 # behind. A BOM makes Zebra's TOML parser fail, and CRLF breaks a shell
 # script's shebang line, so every text file is normalised on the way out.
+# sed, not python: on Git Bash the interpreter on PATH is the Windows one,
+# which cannot open the MSYS-style paths `find` produces here.
 normalised=0
 while IFS= read -r -d '' file; do
     case "${file}" in
         */bin/*) continue ;;
     esac
-    if LC_ALL=C grep -qIl . "${file}" 2>/dev/null; then
-        python - "${file}" <<'PY'
-import sys
-path = sys.argv[1]
-with open(path, 'rb') as handle:
-    data = handle.read()
-cleaned = data.replace(b'\r\n', b'\n')
-if cleaned.startswith(b'\xef\xbb\xbf'):
-    cleaned = cleaned[3:]
-if cleaned != data:
-    with open(path, 'wb') as handle:
-        handle.write(cleaned)
-    print(path)
-PY
+    if LC_ALL=C grep -qI . "${file}" 2>/dev/null; then
+        LC_ALL=C sed -i -e 's/\r$//' -e '1s/^\xef\xbb\xbf//' "${file}"
         normalised=$((normalised + 1))
     fi
 done < <(find "${stage}" -type f -print0)
-printf '    checked %s text files for CRLF and byte-order marks\n' "${normalised}"
+printf '    normalised %s text files (CRLF, byte-order marks)\n' "${normalised}"
+
+# Prove it, rather than assume the sed worked: a BOM or a CR in the node's
+# configuration is a startup failure with an unhelpful message.
+for text in "${stage}/config/live/zebrad.toml" "${stage}/config/live/zainod.toml"; do
+    [ -r "${text}" ] || continue
+    if LC_ALL=C grep -q $'\r' "${text}"; then
+        die "${text} still contains carriage returns after normalisation"
+    fi
+    if [ "$(head -c 3 "${text}" | od -An -tx1 | tr -d ' \n')" = "efbbbf" ]; then
+        die "${text} still starts with a byte-order mark after normalisation"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 log "Uploading to ${REMOTE_DIR}"

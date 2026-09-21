@@ -30,11 +30,25 @@ genesis_file="${config_dir}/genesis.hex"
 [ -r "${manifest}" ] || die "no readable ${manifest}"
 [ -r "${genesis_file}" ] || die "no readable ${genesis_file}"
 
-expected_hash="$(jq -r '.genesis_hash // empty' "${manifest}")"
-[ -n "${expected_hash}" ] || die "manifest has no genesis_hash"
-[[ "${expected_hash}" =~ ^[0-9a-f]{64}$ ]] || die "manifest genesis_hash is not a 32-byte hex hash"
+# The network manifest is workstream A's file, and its shape is theirs: the
+# hash lives under `genesis.hash`. The flat `genesis_hash` spelling is the
+# throwaway fixture's, and is accepted so the same job serves both without a
+# second code path.
+expected_hash="$(jq -r '.genesis.hash // .genesis_hash // empty' "${manifest}")"
+[ -n "${expected_hash}" ] || die "manifest has neither .genesis.hash nor .genesis_hash"
+[[ "${expected_hash}" =~ ^[0-9a-f]{64}$ ]] || die "the manifest genesis hash is not a 32-byte hex hash"
 
-network_name="$(jq -r '.network_name // .name // "the configured testnet"' "${manifest}")"
+network_name="$(jq -r '.identity.network_name // .network_name // .name // "the configured testnet"' "${manifest}")"
+
+# The hex file is the thing actually submitted, so if the manifest says what it
+# should hash to, that is checked before a block is put on a chain.
+expected_hex_sha="$(jq -r '.genesis.hex_file_sha256 // empty' "${manifest}")"
+if [ -n "${expected_hex_sha}" ]; then
+    actual_hex_sha="$(sha256sum "${genesis_file}" | cut -d' ' -f1)"
+    [ "${actual_hex_sha}" = "${expected_hex_sha}" ] \
+        || die "genesis.hex hashes to ${actual_hex_sha}, but the manifest says ${expected_hex_sha}"
+    printf 'swarm-init-genesis: genesis.hex matches the manifest (%s)\n' "${expected_hex_sha:0:16}" >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Wait for the node's RPC
