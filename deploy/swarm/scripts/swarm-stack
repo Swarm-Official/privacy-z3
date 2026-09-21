@@ -43,6 +43,52 @@ Every command is safe to run twice.
 USAGE
 }
 
+# Brought up in three stages rather than one `up --wait`, because the middle
+# one is a job and not a service: `--wait` waits for containers to be running
+# or healthy, and a container that has correctly exited is neither. Waiting on
+# its exit code explicitly also means a genesis mismatch stops the deployment
+# here, loudly, instead of surfacing later as an indexer that will not start.
+stack_start() {
+    local timeout="${SWARM_WAIT_TIMEOUT:-600}"
+    local genesis_container state deadline
+
+    printf '==> node\n'
+    compose up -d --wait --wait-timeout "${timeout}" zebra
+
+    printf '==> genesis\n'
+    # --force-recreate so the container below is certainly this run's. Without
+    # it, an unchanged service is simply restarted, and the first inspect can
+    # still read the *previous* run's "exited 0" - which would look like an
+    # instant success and skip the check entirely.
+    compose up -d --no-deps --force-recreate init-genesis
+    genesis_container="$(compose ps -aq init-genesis | head -n 1)"
+    [ -n "${genesis_container}" ] || die 'the genesis job did not start'
+    deadline=$(( $(date +%s) + timeout ))
+    while :; do
+        state="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "${genesis_container}")"
+        case "${state}" in
+            "exited 0") break ;;
+            exited*)
+                compose logs --no-color init-genesis
+                die "the genesis job failed (${state}); the stack was not started"
+                ;;
+        esac
+        [ "$(date +%s)" -lt "${deadline}" ] || {
+            compose logs --no-color init-genesis
+            die "the genesis job did not finish within ${timeout}s"
+        }
+        sleep 2
+    done
+    compose logs --no-color --tail 5 init-genesis
+
+    printf '==> indexer and proxy\n'
+    if [ $# -gt 0 ]; then
+        compose up -d --wait --wait-timeout "${timeout}" "$@"
+    else
+        compose up -d --wait --wait-timeout "${timeout}" zaino caddy
+    fi
+}
+
 command="${1:-status}"
 shift || true
 
@@ -79,7 +125,7 @@ health)
     ;;
 
 start)
-    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" "$@"
+    stack_start "$@"
     compose ps -a
     ;;
 
@@ -149,7 +195,7 @@ backup)
             -v "${backup_dir}:/backup" \
             alpine:3 tar -czf "/backup/$(basename "${archive}")" -C /source .
     done
-    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}"
+    stack_start
     ls -lh "${backup_dir}" | sed 's/^/  /'
     printf '\nCopy these off the server. A backup that lives only on the machine\n'
     printf 'it backs up is not a backup.\n'
@@ -171,7 +217,7 @@ restore)
         -v "$(cd "$(dirname "${archive}")" && pwd):/backup:ro" \
         alpine:3 tar -xzf "/backup/$(basename "${archive}")" -C /target
     printf 'restored. Starting the stack; the genesis job will verify the hash.\n'
-    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}"
+    stack_start
     ;;
 
 prune)

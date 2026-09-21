@@ -52,7 +52,8 @@ Options:
   --config <dir>          rendered configuration to upload         (default: ./config/live)
   --env <file>            .env to upload                           (default: ./.env)
   --explorer-image <tar>  explorer image tarball to docker load
-  --profile <name>        extra compose profile to start           (e.g. explorer)
+  --profile <name>        extra profiled service to start          (e.g. explorer;
+                          naming a service enables its profile)
   --no-start              upload and load only, do not start
   --no-health             skip the health checks
 OPTIONS
@@ -175,22 +176,20 @@ printf '    checked %s text files for CRLF and byte-order marks\n' "${normalised
 # ---------------------------------------------------------------------------
 log "Uploading to ${REMOTE_DIR}"
 # ---------------------------------------------------------------------------
-remote_env "SWARM_REMOTE_DIR=${REMOTE_DIR}" <<'REMOTE'
-set -euo pipefail
-mkdir -p "${SWARM_REMOTE_DIR}"
-REMOTE
-
-tar -czf - -C "${stage}" . \
-    | ssh "${SSH_OPTS[@]}" "${TARGET}" "env SWARM_REMOTE_DIR=${REMOTE_DIR} bash -s" <<'REMOTE'
-set -euo pipefail
-tar -xzf - -C "${SWARM_REMOTE_DIR}"
-chmod 0600 "${SWARM_REMOTE_DIR}/.env"
-find "${SWARM_REMOTE_DIR}/scripts" -type f -exec chmod 0755 {} +
-find "${SWARM_REMOTE_DIR}/images" -name '*.sh' -exec chmod 0755 {} +
-[ -d "${SWARM_REMOTE_DIR}/bin" ] && chmod 0755 "${SWARM_REMOTE_DIR}"/bin/* || true
+# The tar stream IS this command's stdin, so the remote script is passed as an
+# argument rather than on a heredoc - a heredoc would replace the stream.
+unpack_remotely="set -eu
+target='${REMOTE_DIR}'
+mkdir -p \"\${target}\"
+tar -xzf - -C \"\${target}\"
+chmod 0600 \"\${target}/.env\"
+find \"\${target}/scripts\" -type f -exec chmod 0755 {} +
+find \"\${target}/images\" -name '*.sh' -exec chmod 0755 {} +
+if [ -d \"\${target}/bin\" ]; then chmod 0755 \"\${target}\"/bin/*; fi
 printf 'uploaded:\n'
-ls -la "${SWARM_REMOTE_DIR}"
-REMOTE
+ls -la \"\${target}\""
+
+tar -czf - -C "${stage}" . | ssh "${SSH_OPTS[@]}" "${TARGET}" "${unpack_remotely}"
 
 # ---------------------------------------------------------------------------
 if [ -n "${IMAGES_DIR}" ]; then
@@ -239,21 +238,18 @@ fi
 # ---------------------------------------------------------------------------
 log 'Starting the stack'
 # ---------------------------------------------------------------------------
-remote_env "SWARM_REMOTE_DIR=${REMOTE_DIR}" "SWARM_PROFILES=${COMPOSE_PROFILES}" <<'REMOTE'
+# The same entry point the operator uses, so a deploy and a manual start are
+# the same code path: node, then the genesis job with its exit status checked,
+# then the indexer and the proxy.
+remote_env "SWARM_REMOTE_DIR=${REMOTE_DIR}" "SWARM_EXTRA_SERVICES=${COMPOSE_PROFILES}" <<'REMOTE'
 set -euo pipefail
 cd "${SWARM_REMOTE_DIR}"
-profile_args=()
-[ -n "${SWARM_PROFILES}" ] && profile_args=(--profile "${SWARM_PROFILES}")
 
-# `--wait` blocks on the health checks and on the genesis job completing
-# successfully, so a failure here is a failure to deploy, not a surprise later.
-docker compose --env-file .env "${profile_args[@]}" up -d --wait --wait-timeout 600
-
-echo '--- services ---'
-docker compose --env-file .env "${profile_args[@]}" ps -a
-
-echo '--- genesis job ---'
-docker compose --env-file .env logs --no-color --tail 20 init-genesis
+if [ -n "${SWARM_EXTRA_SERVICES}" ]; then
+    bash scripts/swarm-stack start zaino caddy "${SWARM_EXTRA_SERVICES}"
+else
+    bash scripts/swarm-stack start
+fi
 
 # Disk hygiene: the previous images become untagged on every update, and a
 # 96 GB disk that also holds a chain should not accumulate them.

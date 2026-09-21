@@ -8,10 +8,17 @@
 # Validate a change before deploying it:
 #   docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
 #     -e SWARM_LWD_DOMAIN=lwd.example.test -e SWARM_ACME_EMAIL=ops@example.test \
-#     caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile
+#     caddy:2.11-alpine caddy validate --config /etc/caddy/Caddyfile
 
 {
 	email {$SWARM_ACME_EMAIL}
+
+	# Production by default. Point this at Let's Encrypt's staging directory
+	# while testing - staging certificates are not trusted by browsers, which
+	# is the point, and its rate limits are generous where production's are
+	# not. Remove the caddy_data volume when switching back, so no staging
+	# certificate is kept for a name that will serve real traffic.
+	acme_ca {$SWARM_ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
 
 	servers {
 		# HTTP/1.1 for the ACME challenge and the redirect, HTTP/2 for gRPC.

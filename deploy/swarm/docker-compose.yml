@@ -175,7 +175,7 @@ services:
           memory: ${SWARM_ZAINO_MEMORY_RESERVATION:-512m}
 
   caddy:
-    image: ${SWARM_CADDY_IMAGE:-caddy:2.10-alpine}
+    image: ${SWARM_CADDY_IMAGE:-caddy:2.11-alpine}
     restart: unless-stopped
     stop_grace_period: 20s
     <<: [*hardening]
@@ -188,6 +188,7 @@ services:
       SWARM_LWD_DOMAIN: ${SWARM_LWD_DOMAIN:?set the light-wallet domain in .env}
       SWARM_EXPLORE_DOMAIN: ${SWARM_EXPLORE_DOMAIN:-explore.invalid}
       SWARM_ACME_EMAIL: ${SWARM_ACME_EMAIL:?set the ACME contact address in .env}
+      SWARM_ACME_CA: ${SWARM_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
       SWARM_ZAINO_GRPC_PORT: ${SWARM_ZAINO_GRPC_PORT:-8137}
       SWARM_EXPLORER_PORT: ${SWARM_EXPLORER_PORT:-4000}
       SWARM_HSTS_MAX_AGE: ${SWARM_HSTS_MAX_AGE:-31536000}

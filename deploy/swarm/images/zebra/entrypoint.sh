@@ -46,8 +46,23 @@ export ZEBRA_RPC__COOKIE_DIR=/swarm/auth
 # Peers dial the address the node advertises, not the one it binds. Without a
 # public address Zebra still makes outbound connections but accepts none, so a
 # seed node is only a seed once this is set.
+#
+# Zebra parses `external_addr` as a SocketAddr and then as a bare IpAddr, and
+# nothing else - despite what its own error hint says, a DNS name there does
+# not parse. So a name given here is resolved once, at startup, and the literal
+# address is what gets advertised. `seed.swarm.green` remains the name other
+# nodes put in their peer lists; it just cannot be the value of this field.
 if [ -n "${SWARM_PUBLIC_IP:-}" ]; then
-    export ZEBRA_NETWORK__EXTERNAL_ADDR="${SWARM_PUBLIC_IP}:${p2p_port}"
+    external_ip="${SWARM_PUBLIC_IP}"
+    case "${external_ip}" in
+        *[!0-9.]*)
+            resolved="$(getent ahostsv4 "${external_ip}" | awk 'NR==1 {print $1}')"
+            [ -n "${resolved}" ] || die "cannot resolve SWARM_PUBLIC_IP '${external_ip}' to an IPv4 address"
+            printf 'swarm-zebra: advertising %s as %s\n' "${external_ip}" "${resolved}" >&2
+            external_ip="${resolved}"
+            ;;
+    esac
+    export ZEBRA_NETWORK__EXTERNAL_ADDR="${external_ip}:${p2p_port}"
 else
     printf 'swarm-zebra: SWARM_PUBLIC_IP is unset; this node will not advertise itself to peers\n' >&2
 fi

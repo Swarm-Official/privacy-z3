@@ -74,8 +74,67 @@ jobs:
           printf 'checking %s\n' "${scripts[@]}"
           shellcheck --severity=warning "${scripts[@]}"
 
-      - name: Check python syntax
-        run: python3 -m py_compile deploy/swarm/images/ops/lightd_info_decode.py
+      # The decoder is the thing that decides whether the deployed indexer is
+      # serving the right chain, so it gets a real test rather than a syntax
+      # check. The fixture includes the trap: `branch` (field 9) on a build
+      # from this work's branch literally contains the string "swarm-testnet",
+      # so anything that greps the raw bytes instead of reading field 4 passes
+      # when it should not.
+      - name: Test the GetLightdInfo decoder
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, struct, subprocess, sys
+
+          def varint(n):
+              out = b''
+              while True:
+                  b, n = n & 0x7f, n >> 7
+                  out += bytes([b | (0x80 if n else 0)])
+                  if not n:
+                      return out
+
+          def string_field(number, text):
+              data = text.encode()
+              return varint((number << 3) | 2) + varint(len(data)) + data
+
+          def varint_field(number, value):
+              return varint((number << 3) | 0) + varint(value)
+
+          message = (
+              string_field(1, "0.10.0")
+              + string_field(2, "ZingoLabs ZainoD")
+              + varint_field(3, 1)
+              + string_field(4, "swarm-testnet")
+              + varint_field(5, 1)
+              + string_field(6, "37a5165b")
+              + varint_field(7, 12345)
+              + string_field(9, "swarm-testnet-support")
+              + string_field(18, "v0.5.0")
+          )
+          frame = b"\x00" + struct.pack(">I", len(message)) + message
+
+          decoder = "deploy/swarm/images/ops/lightd_info_decode.py"
+          done = subprocess.run([sys.executable, decoder], input=frame, capture_output=True)
+          assert done.returncode == 0, done.stderr.decode()
+          fields = json.loads(done.stdout)
+          assert fields["chain_name"] == "swarm-testnet", fields
+          assert fields["branch"] == "swarm-testnet-support", fields
+          assert fields["block_height"] == 12345, fields
+          assert fields["taddr_support"] is True, fields
+
+          # A compressed frame is refused rather than mis-read.
+          done = subprocess.run([sys.executable, decoder],
+                                input=b"\x01" + struct.pack(">I", len(message)) + message,
+                                capture_output=True)
+          assert done.returncode != 0, "a compressed frame must be refused"
+
+          # A truncated frame is refused rather than silently short-decoded.
+          done = subprocess.run([sys.executable, decoder], input=frame[:12], capture_output=True)
+          assert done.returncode != 0, "a truncated frame must be refused"
+
+          print("decoder ok")
+          PY
 
       # `docker compose config` cannot be run on the authoring machine (no
       # working Docker there), so this is the first place the file is parsed
@@ -109,7 +168,7 @@ jobs:
             -e SWARM_ZAINO_GRPC_PORT=8137 \
             -e SWARM_EXPLORER_PORT=4000 \
             -e SWARM_HSTS_MAX_AGE=31536000 \
-            caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            caddy:2.11-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
       - name: Check the HSTS policy is max-age only
         run: |
@@ -344,14 +403,17 @@ jobs:
           docker compose --env-file .env build zebra zaino init-genesis
           docker image ls | grep -E 'swarm-(zebra|zaino|ops)'
 
-      # Caddy is left out: there is no DNS for lwd.swarm.green pointing here,
-      # so it could only fail to obtain a certificate. `docker compose up zaino`
-      # starts its dependencies - the node and the one-shot genesis job.
+      # Caddy is left out: lwd.swarm.green points at the real server, not at a
+      # runner, so it could only fail to obtain a certificate here. This is the
+      # same entry point the deploy and the operator use, so CI exercises the
+      # bring-up sequence rather than a CI-only approximation of it.
       - name: Start the node, submit genesis and start the indexer
         working-directory: deploy/swarm
+        env:
+          SWARM_WAIT_TIMEOUT: 420
         run: |
           set -euo pipefail
-          docker compose --env-file .env up -d --wait --wait-timeout 420 zaino
+          bash scripts/swarm-stack start zaino
           docker compose --env-file .env ps -a
 
       - name: The genesis job ran, submitted once, and verified
@@ -462,7 +524,7 @@ jobs:
             || { echo "::error::the indexer did not restart after the node rotated its cookie"; exit 1; }
 
           echo '--- waiting for the indexer to serve again ---'
-          docker compose --env-file .env up -d --wait --wait-timeout 300 zaino
+          SWARM_WAIT_TIMEOUT=300 bash scripts/swarm-stack start zaino
           info="$(docker compose --env-file .env run --rm --no-deps -T init-genesis \
             swarm-lightd-info h2c://zaino:8137)"
           printf '%s\n' "${info}"
