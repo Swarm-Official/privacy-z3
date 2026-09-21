@@ -170,10 +170,20 @@ jobs:
             -e SWARM_HSTS_MAX_AGE=31536000 \
             caddy:2.11-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
+      # includeSubDomains would speak for names this server does not serve, and
+      # preload is close to irreversible. Comments are stripped first: the
+      # Caddyfile explains the policy in prose, and matching that prose is how
+      # this check first failed.
       - name: Check the HSTS policy is max-age only
         run: |
           set -euo pipefail
-          if grep -iE 'includeSubDomains|preload' deploy/swarm/Caddyfile; then
+          directives="$(grep -v '^[[:space:]]*#' deploy/swarm/Caddyfile | grep -i 'Strict-Transport-Security' || true)"
+          if [ -z "${directives}" ]; then
+            echo "::error::the Caddyfile sets no Strict-Transport-Security header"
+            exit 1
+          fi
+          printf '%s\n' "${directives}"
+          if grep -iE 'includeSubDomains|preload' <<<"${directives}"; then
             echo "::error::the HSTS header must carry max-age only"
             exit 1
           fi

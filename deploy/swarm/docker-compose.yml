@@ -2,7 +2,7 @@
 #
 #   docker compose --env-file .env up -d
 #
-# Sized for the rented box: 2 shared vCPUs, 4 GB RAM, 100 GB SSD, Ubuntu 24.04.
+# Sized for the rented box: 2 shared vCPUs, 4 GB RAM, 96 GB SSD, Ubuntu 26.04.
 # Nothing is compiled or built from source there. The zebra, zaino and ops
 # images are produced in GitHub Actions from the prebuilt binaries, exported
 # with `docker save`, copied over with scp and installed with `docker load` by
