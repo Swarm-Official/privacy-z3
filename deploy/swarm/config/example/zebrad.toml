@@ -1,0 +1,76 @@
+# THROWAWAY configured testnet for CI and for the first run on a fresh server.
+#
+# NOT SwarmTestnet: the name and magic differ on purpose, so a node running
+# this file cannot join the real network even by mistake. The real file is
+# rendered by workstream A from network/swarm-testnet/manifest.json.
+#
+# Everything this stack supplies per-deployment - listen addresses, external
+# address, state directory, cookie directory, miner address - is set as a
+# ZEBRA_* environment override by images/zebra/entrypoint.sh and is
+# deliberately absent here.
+#
+# UTF-8, no byte-order mark.
+
+[network]
+network = "Testnet"
+initial_mainnet_peers = []
+initial_testnet_peers = []
+# The public testnet's peer cache must never be consulted for a private chain.
+cache_dir = false
+# Zebra opens one outbound connection per peer IP, so a second seed later needs
+# its own address; this only bounds inbound connections from one address.
+max_connections_per_ip = 8
+peerset_initial_target_size = 8
+
+[network.testnet_parameters]
+network_name = "SwarmCiTestnet"
+network_magic = [83, 87, 67, 73]
+genesis_hash = "01d6e85dd3c1c128941a849c5025cd2e437258811a2551b82aefd68686c982e1"
+disable_pow = false
+checkpoints = false
+slow_start_interval = 0
+pre_blossom_halving_interval = 840000
+# The upstream Testnet bound. A larger easy limit overflows the 17-target
+# difficulty average; regtest's easier limit is not valid on a PoW testnet.
+target_difficulty_limit = "07ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+lockbox_disbursements = []
+# An explicitly empty recipient schedule replaces the upstream defaults for
+# this range. The real network's 80/8/4/8 split needs three P2SH t2 addresses,
+# which is why this fixture cannot exercise it.
+funding_streams = [{ height_range = { start = 1, end = 100000000 }, recipients = [] }]
+
+[network.testnet_parameters.activation_heights]
+BeforeOverwinter = 1
+Overwinter = 1
+Sapling = 1
+Blossom = 1
+Heartwood = 1
+Canopy = 1
+NU5 = 1
+NU6 = 1
+"NU6.1" = 1
+"NU6.2" = 1
+"NU6.3" = 1
+
+[state]
+# cache_dir comes from ZEBRA_STATE__CACHE_DIR.
+delete_old_database = true
+
+[rpc]
+# listen_addr, cookie_dir and enable_cookie_auth come from the environment.
+parallel_cpu_threads = 1
+
+[sync]
+parallel_cpu_threads = 1
+
+[mempool]
+# A private network must not wait for the public Zcash chain tip before
+# accepting transactions. Proof-of-work validation is unaffected.
+debug_enable_at_height = 0
+
+[mining]
+# miner_address and internal_miner come from the environment, so the same
+# rendered file serves a mining node and a non-mining one.
+
+[tracing]
+use_color = false

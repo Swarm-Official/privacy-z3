@@ -1,0 +1,11 @@
+# The real rendered configuration, the binaries and the image tarballs never
+# go in git: they are produced by CI or by workstream A and uploaded by
+# scripts/deploy.sh.
+/.env
+/.env.*
+!/.env.example
+/bin/
+/dist/
+/config/live/
+/logs/
+/backups/

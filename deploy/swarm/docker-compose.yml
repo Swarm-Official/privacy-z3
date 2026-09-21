@@ -1,0 +1,272 @@
+# SWARM testnet server stack.
+#
+#   docker compose --env-file .env up -d
+#
+# Sized for the rented box: 2 shared vCPUs, 4 GB RAM, 100 GB SSD, Ubuntu 24.04.
+# Nothing is compiled or built from source there. The zebra, zaino and ops
+# images are produced in GitHub Actions from the prebuilt binaries, exported
+# with `docker save`, copied over with scp and installed with `docker load` by
+# scripts/deploy.sh. The `build:` sections below are what CI uses to produce
+# them, and they remain a documented fallback: `docker compose up` builds only
+# when the tagged image is absent, so a loaded image is always preferred.
+#
+# Four long-running services and one job:
+#
+#   zebra         the seed node. Official Zebra v6.3.0 consensus, built with
+#                 the optional `internal-miner` feature, running a configured
+#                 Testnet whose parameters come entirely from the mounted
+#                 zebrad.toml. Only its P2P port is published.
+#   init-genesis  a one-shot job that submits genesis.hex on an empty database
+#                 and verifies the resulting hash against the manifest.
+#   zaino         the light-wallet indexer. Speaks plaintext h2c on the
+#                 internal network only; TLS is terminated by caddy.
+#   caddy         the only service with public HTTP ports. Obtains and renews
+#                 certificates automatically.
+#   explorer      a disabled slot (profile `explorer`), image supplied later.
+#
+# Memory limits total ~2.9 GB with the explorer running, leaving room for the
+# host and the 2 GB swap file provision.sh creates. Every variable is
+# documented in .env.example.
+
+name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}
+
+# Bounded logs. The stack runs unattended, and Zebra at info level is chatty,
+# so growth is capped per service rather than left to the daemon default:
+# 10 MB x 5 files x 5 services is about 250 MB worst case on a 100 GB disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${SWARM_LOG_MAX_SIZE:-10m}
+    max-file: ${SWARM_LOG_MAX_FILES:-5}
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  zebra:
+    build:
+      context: .
+      dockerfile: images/zebra/Dockerfile
+    image: ${SWARM_ZEBRA_IMAGE:-swarm-zebra:local}
+    hostname: zebra
+    restart: unless-stopped
+    # Zebra flushes its state and closes RocksDB on SIGINT/SIGTERM; killing it
+    # early risks a rebuild of the non-finalised state on the next start.
+    stop_grace_period: 60s
+    <<: [*hardening]
+    logging: *logging
+    environment:
+      # Translated into ZEBRA_* config overrides by the image entrypoint, which
+      # drops the ones that are empty (config-rs would otherwise read an empty
+      # string as a value and fail to parse the address).
+      SWARM_P2P_PORT: ${SWARM_P2P_PORT:-18233}
+      SWARM_RPC_PORT: ${SWARM_RPC_PORT:-18232}
+      SWARM_PUBLIC_IP: ${SWARM_PUBLIC_IP:-}
+      SWARM_MINER_ADDRESS: ${SWARM_MINER_ADDRESS:-}
+      SWARM_INTERNAL_MINER: ${SWARM_INTERNAL_MINER:-true}
+      SWARM_RAYON_THREADS: ${SWARM_ZEBRA_RAYON_THREADS:-2}
+      ZEBRA_TRACING__FILTER: ${SWARM_ZEBRA_LOG:-info}
+    volumes:
+      - chain:/swarm/state
+      - auth:/swarm/auth
+      - ${SWARM_CONFIG_DIR:-./config/live}:/swarm/config:ro
+    ports:
+      # The only port this container publishes. The RPC listener binds
+      # 0.0.0.0 inside the container so the other containers can reach it by
+      # service name, and is never published, so it is not reachable from
+      # outside the host.
+      - "${SWARM_P2P_PORT:-18233}:${SWARM_P2P_PORT:-18233}/tcp"
+    healthcheck:
+      test: ["CMD", "swarm-zebra-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # A cold start opens RocksDB and replays the non-finalised state.
+      start_period: 120s
+      start_interval: 5s
+    deploy:
+      resources:
+        limits:
+          # Two shared vCPUs, and the indexer must stay responsive while the
+          # baseline miner runs, so the node is capped at one of them. A
+          # slower baseline miner only means slower blocks until other miners
+          # join; it does not weaken anything.
+          cpus: "${SWARM_ZEBRA_CPUS:-1.0}"
+          memory: ${SWARM_ZEBRA_MEMORY:-1g}
+        reservations:
+          memory: ${SWARM_ZEBRA_MEMORY_RESERVATION:-512m}
+
+  # Runs once per `up`, then exits. On an empty database it submits genesis.hex
+  # through the node's own RPC; on an initialised database it only verifies.
+  # Either way it ends by proving the node's height-zero hash is the one in
+  # manifest.json, so the indexer never starts against the wrong chain.
+  init-genesis:
+    build:
+      context: .
+      dockerfile: images/ops/Dockerfile
+    image: ${SWARM_OPS_IMAGE:-swarm-ops:local}
+    restart: "no"
+    <<: [*hardening]
+    logging: *logging
+    command: ["swarm-init-genesis"]
+    environment:
+      SWARM_ZEBRA_RPC: zebra:${SWARM_RPC_PORT:-18232}
+      SWARM_RPC_WAIT_SECONDS: ${SWARM_RPC_WAIT_SECONDS:-300}
+    volumes:
+      - auth:/swarm/auth:ro
+      - ${SWARM_CONFIG_DIR:-./config/live}:/swarm/config:ro
+    depends_on:
+      zebra:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "${SWARM_OPS_CPUS:-0.5}"
+          memory: ${SWARM_OPS_MEMORY:-128m}
+
+  zaino:
+    build:
+      context: .
+      dockerfile: images/zaino/Dockerfile
+    image: ${SWARM_ZAINO_IMAGE:-swarm-zaino:local}
+    hostname: zaino
+    restart: unless-stopped
+    stop_grace_period: 30s
+    <<: [*hardening]
+    logging: *logging
+    environment:
+      SWARM_ZAINO_GRPC_PORT: ${SWARM_ZAINO_GRPC_PORT:-8137}
+      SWARM_ZEBRA_RPC: zebra:${SWARM_RPC_PORT:-18232}
+      SWARM_COOKIE_WAIT_SECONDS: ${SWARM_COOKIE_WAIT_SECONDS:-300}
+      SWARM_COOKIE_POLL_SECONDS: ${SWARM_COOKIE_POLL_SECONDS:-5}
+      SWARM_COOKIE_MISSING_GRACE_SECONDS: ${SWARM_COOKIE_MISSING_GRACE_SECONDS:-120}
+      RUST_LOG: ${SWARM_ZAINO_LOG:-info,reqwest=warn,hyper_util=warn}
+      RUST_BACKTRACE: ${RUST_BACKTRACE:-1}
+    volumes:
+      - zaino:/swarm/data
+      - auth:/swarm/auth:ro
+      - ${SWARM_CONFIG_DIR:-./config/live}:/swarm/config:ro
+    # No published ports: the gRPC listener is reachable only from caddy over
+    # the internal network. Zaino itself refuses a non-private plaintext bind,
+    # which the entrypoint satisfies by binding the container's own address.
+    depends_on:
+      zebra:
+        condition: service_healthy
+      init-genesis:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "swarm-zaino-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+      start_interval: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "${SWARM_ZAINO_CPUS:-1.0}"
+          memory: ${SWARM_ZAINO_MEMORY:-1g}
+        reservations:
+          # The indexer must keep serving wallets while the miner runs, so its
+          # share of memory is reserved rather than left to whoever asks first.
+          memory: ${SWARM_ZAINO_MEMORY_RESERVATION:-512m}
+
+  caddy:
+    image: ${SWARM_CADDY_IMAGE:-caddy:2.10-alpine}
+    restart: unless-stopped
+    stop_grace_period: 20s
+    <<: [*hardening]
+    # Binding 80 and 443 inside the container needs the capability back; Caddy
+    # drops to its own user afterwards.
+    cap_add:
+      - NET_BIND_SERVICE
+    logging: *logging
+    environment:
+      SWARM_LWD_DOMAIN: ${SWARM_LWD_DOMAIN:?set the light-wallet domain in .env}
+      SWARM_EXPLORE_DOMAIN: ${SWARM_EXPLORE_DOMAIN:-explore.invalid}
+      SWARM_ACME_EMAIL: ${SWARM_ACME_EMAIL:?set the ACME contact address in .env}
+      SWARM_ZAINO_GRPC_PORT: ${SWARM_ZAINO_GRPC_PORT:-8137}
+      SWARM_EXPLORER_PORT: ${SWARM_EXPLORER_PORT:-4000}
+      SWARM_HSTS_MAX_AGE: ${SWARM_HSTS_MAX_AGE:-31536000}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    depends_on:
+      zaino:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${SWARM_CADDY_CPUS:-0.25}"
+          memory: ${SWARM_CADDY_MEMORY:-128m}
+
+  # ===========================================================================
+  # EXPLORER SLOT - disabled. Nothing starts it unless `--profile explorer` is
+  # passed, and the image is supplied later by workstream D as a `docker save`
+  # tarball, exactly like the zebra and zaino images: nothing is built here.
+  #
+  # To enable, once that artifact exists:
+  #   1. scripts/deploy.sh --explorer-image <tarball>   (scp + docker load)
+  #   2. set SWARM_EXPLORER_IMAGE and SWARM_EXPLORER_PORT in .env
+  #   3. uncomment the explore block in ./Caddyfile
+  #   4. add the explore A record at the registrar
+  #   5. docker compose --env-file .env --profile explorer up -d
+  # ===========================================================================
+  explorer:
+    profiles: ["explorer"]
+    image: ${SWARM_EXPLORER_IMAGE:-swarm-explorer-image-not-configured}
+    restart: unless-stopped
+    <<: [*hardening]
+    logging: *logging
+    environment:
+      # The explorer reads the node's JSON-RPC. It gets the same cookie the
+      # indexer does, read-only, and is never published directly.
+      SWARM_ZEBRA_RPC: zebra:${SWARM_RPC_PORT:-18232}
+      PORT: ${SWARM_EXPLORER_PORT:-4000}
+    volumes:
+      - auth:/swarm/auth:ro
+    depends_on:
+      zebra:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "${SWARM_EXPLORER_CPUS:-0.5}"
+          memory: ${SWARM_EXPLORER_MEMORY:-768m}
+        reservations:
+          memory: ${SWARM_EXPLORER_MEMORY_RESERVATION:-256m}
+
+volumes:
+  # The chain. This is the volume to back up; everything else is rebuildable.
+  chain:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-chain
+  # The indexer database. Rebuildable from the chain, but slow to rebuild.
+  zaino:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-zaino
+  # Zebra's RPC cookie. Rewritten with a fresh secret on every node start; see
+  # images/zaino/entrypoint.sh for how the indexer follows the rotation.
+  auth:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-auth
+  # Issued certificates and ACME account keys. Losing this only forces a
+  # re-issue, but rate limits make that worth keeping.
+  caddy_data:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-caddy-data
+  caddy_config:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-caddy-config
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}

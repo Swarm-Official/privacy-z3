@@ -1,0 +1,67 @@
+# THROWAWAY indexer configuration for CI and for the first run on a fresh
+# server. The real file is rendered by workstream A from the network manifest.
+#
+# The `[network.CustomTestnet]` block is the whole point of the fork: the
+# indexer fetches height zero from the node and compares its hash and the
+# node's full upgrade schedule against these values before it opens its index.
+# A node on a different chain, or with a different schedule, stops startup
+# instead of silently indexing the wrong blocks.
+#
+# Deployment-specific values - the gRPC listen address, the node's RPC address
+# and the cookie path - are set as ZAINO_* environment overrides by
+# images/zaino/entrypoint.sh and are deliberately absent here.
+#
+# UTF-8, no byte-order mark.
+
+backend = "rpc"
+
+# A persistent finalised-state database: the volume survives the restarts the
+# cookie watcher triggers, so those cost a reconnect and not a reindex.
+ephemeral_finalised_state = false
+
+[network.CustomTestnet]
+genesis_hash = "01d6e85dd3c1c128941a849c5025cd2e437258811a2551b82aefd68686c982e1"
+
+[network.CustomTestnet.activation_heights]
+BeforeOverwinter = 1
+Overwinter = 1
+Sapling = 1
+Blossom = 1
+Heartwood = 1
+Canopy = 1
+NU5 = 1
+NU6 = 1
+"NU6.1" = 1
+"NU6.2" = 1
+"NU6.3" = 1
+
+[grpc_settings]
+# Replaced at startup with the container's own RFC1918 address, which is what
+# satisfies zainod's refusal to serve plaintext gRPC on a non-private address.
+# TLS is terminated by Caddy; this listener is never published.
+listen_address = "127.0.0.1:8137"
+
+[validator_settings]
+# Replaced at startup with the node's service address and the shared cookie.
+validator_jsonrpc_listen_address = "127.0.0.1:18232"
+
+[service]
+timeout = 30
+channel_size = 32
+
+[storage.cache]
+capacity = 1000
+shard_power = 4
+
+[storage.database]
+path = "/swarm/data/state"
+# LMDB map size in GB. An address-space reservation, not resident memory; the
+# file grows sparsely inside it. Raise it long before the chain approaches it.
+size = 4
+# HEAP budgets, in GiB, and both default to 8 - which would be an instant
+# OOM-kill inside a 1 GB container limit. On a 4 GB box they have to be set.
+sync_write_batch_size = 1
+accumulator_rebuild_memory_size = 1
+# Seconds between bulk-sync commits: also the window of unflushed writes at
+# risk on a hard kill, so it is short here rather than the 120s default.
+sync_checkpoint_interval = 10

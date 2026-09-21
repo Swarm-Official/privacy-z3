@@ -1,0 +1,5 @@
+# Everything in this folder is copied to a Linux server verbatim. Shell
+# scripts, Dockerfiles and the Caddyfile break or misbehave with CRLF, so the
+# working copy is LF on every platform, not only the blob.
+* text=auto eol=lf
+*.hex text eol=lf

@@ -1,0 +1,11 @@
+# The build context is deploy/swarm. Only the binaries and the image files
+# belong in it: configuration and secrets are mounted at run time, never baked.
+.env
+.env.*
+config/
+dist/
+scripts/
+docs/
+*.md
+*.tar
+*.tar.gz

@@ -1,0 +1,67 @@
+# The only container with public HTTP ports.
+#
+# Two jobs: terminate TLS for the light-wallet gRPC service, and hold a
+# disabled slot for the explorer. Certificates are obtained and renewed
+# automatically, which needs the A records to resolve to this server and ports
+# 80 and 443 to be reachable before the stack is first started.
+#
+# Validate a change before deploying it:
+#   docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+#     -e SWARM_LWD_DOMAIN=lwd.example.test -e SWARM_ACME_EMAIL=ops@example.test \
+#     caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile
+
+{
+	email {$SWARM_ACME_EMAIL}
+
+	servers {
+		# HTTP/1.1 for the ACME challenge and the redirect, HTTP/2 for gRPC.
+		# HTTP/3 is left off on purpose: gRPC clients reach this over TCP, and
+		# leaving it enabled would mean opening UDP/443 in the firewall for a
+		# path nothing here uses.
+		protocols h1 h2
+	}
+}
+
+# max-age only. No includeSubDomains, because the apex and the other
+# subdomains are not this server's to speak for, and no preload, which is a
+# hard-to-reverse commitment for a testnet.
+(swarm_hsts) {
+	header {
+		Strict-Transport-Security "max-age={$SWARM_HSTS_MAX_AGE}"
+		-Server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Light-wallet indexer: gRPC over TLS.
+#
+# `h2c://` makes the upstream connection plaintext HTTP/2, which is what the
+# indexer serves on the internal network. Wallets get TLS; the hop between
+# these two containers never leaves the host.
+# ---------------------------------------------------------------------------
+{$SWARM_LWD_DOMAIN} {
+	import swarm_hsts
+
+	reverse_proxy h2c://zaino:{$SWARM_ZAINO_GRPC_PORT} {
+		transport http {
+			versions h2c 2
+		}
+		# Light wallets hold GetBlockRange and mempool streams open for a long
+		# time, and buffering a stream would break them.
+		flush_interval -1
+	}
+}
+
+# ---------------------------------------------------------------------------
+# EXPLORER SLOT - DISABLED.
+#
+# Uncomment this block once workstream D has supplied the explorer image, the
+# explore A record exists, and `docker compose --profile explorer up -d` is
+# running the service. Until then the name is not served at all, so no
+# certificate is requested for it and no empty page is published.
+# ---------------------------------------------------------------------------
+# {$SWARM_EXPLORE_DOMAIN} {
+# 	import swarm_hsts
+#
+# 	reverse_proxy explorer:{$SWARM_EXPLORER_PORT}
+# }

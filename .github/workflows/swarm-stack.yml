@@ -1,0 +1,519 @@
+# SWARM workstream F: prove the server stack without the server.
+#
+# The runner stands the whole thing up against a THROWAWAY configured testnet
+# (`SwarmCiTestnet`, magic SWCI, a throwaway genesis, a throwaway miner
+# address), submits genesis once, waits for the internal miner to produce
+# blocks, asks the indexer for GetLightdInfo over plain h2c, restarts the node
+# to force an RPC-cookie rotation and checks that the indexer recovers by
+# itself, then tears everything down.
+#
+# It also produces the images the server runs: `docker save` tarballs uploaded
+# as artifacts, so nothing is ever built or compiled on the server itself.
+#
+# What this CANNOT prove, and nothing can until the DNS records exist and point
+# at the server: Caddy obtaining a real certificate, HTTP/2 gRPC over public
+# TLS, and the firewall. The Caddyfile is validated here, not exercised.
+name: SWARM server stack
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - swarm-testnet
+    paths:
+      - "deploy/swarm/**"
+      - ".github/workflows/swarm-stack.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+  # The two binaries the images copy in. Pinned here, and recorded in each
+  # image's build manifest, so a deployed server can be traced back to source.
+  ZEBRA_REPO: brs-holding/privacy-zebra
+  ZEBRA_REF: v6.3.0
+  ZEBRA_FEATURES: internal-miner
+  ZAINO_REPO: brs-holding/privacy-zaino
+  ZAINO_REF: swarm-testnet-support
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Static checks. Fast, and they fail before an hour of compiling does.
+  # --------------------------------------------------------------------------
+  lint:
+    name: Lint the stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -qq update
+          sudo apt-get -o Acquire::Retries=3 -qq install -y --no-install-recommends shellcheck
+
+      - name: Shellcheck every script
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(find deploy/swarm \( -name '*.sh' -o -name 'swarm-stack' \) | sort)
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::no scripts found under deploy/swarm"
+            exit 1
+          fi
+          printf 'checking %s\n' "${scripts[@]}"
+          shellcheck --severity=warning "${scripts[@]}"
+
+      - name: Check python syntax
+        run: python3 -m py_compile deploy/swarm/images/ops/lightd_info_decode.py
+
+      # `docker compose config` cannot be run on the authoring machine (no
+      # working Docker there), so this is the first place the file is parsed
+      # and interpolated at all.
+      - name: Validate the compose file
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          # The values that have no default, filled with obvious placeholders.
+          {
+            echo 'SWARM_PUBLIC_IP=198.51.100.10'
+            echo 'SWARM_MINER_ADDRESS=tmSRd1r8gs77Ja67Fw1JcdoXytxsyrLTPJm'
+            echo 'SWARM_ACME_EMAIL=ops@example.invalid'
+          } >> .env
+          docker compose --env-file .env config --quiet
+          echo '--- services ---'
+          docker compose --env-file .env config --services
+          echo '--- with the explorer profile ---'
+          docker compose --env-file .env --profile explorer config --services
+
+      - name: Validate the Caddyfile
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${PWD}/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e SWARM_ACME_EMAIL=ops@example.invalid \
+            -e SWARM_LWD_DOMAIN=lwd.example.invalid \
+            -e SWARM_EXPLORE_DOMAIN=explore.example.invalid \
+            -e SWARM_ZAINO_GRPC_PORT=8137 \
+            -e SWARM_EXPLORER_PORT=4000 \
+            -e SWARM_HSTS_MAX_AGE=31536000 \
+            caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Check the HSTS policy is max-age only
+        run: |
+          set -euo pipefail
+          if grep -iE 'includeSubDomains|preload' deploy/swarm/Caddyfile; then
+            echo "::error::the HSTS header must carry max-age only"
+            exit 1
+          fi
+
+  # --------------------------------------------------------------------------
+  # The two binaries. Each is cached on its own key, so only the first run pays
+  # for the compile.
+  # --------------------------------------------------------------------------
+  zebrad:
+    name: zebrad ${{ github.event.repository.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve the pinned revision
+        id: resolve
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote "https://github.com/${ZEBRA_REPO}.git" "${ZEBRA_REF}" | cut -f1 | head -n 1)"
+          [ -n "${sha}" ] || { echo "::error::cannot resolve ${ZEBRA_REPO}@${ZEBRA_REF}"; exit 1; }
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "${ZEBRA_REPO}@${ZEBRA_REF} = ${sha}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Restore the built binary
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/zebrad
+          key: swarm-bin-zebrad-${{ steps.resolve.outputs.sha }}-${{ env.ZEBRA_FEATURES }}-ubuntu2204
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          repository: ${{ env.ZEBRA_REPO }}
+          ref: ${{ steps.resolve.outputs.sha }}
+          path: zebra
+          persist-credentials: false
+
+      - name: Install build prerequisites
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -qq update
+          sudo apt-get -o Acquire::Retries=3 -qq install -y --no-install-recommends \
+            clang libclang-dev cmake protobuf-compiler
+
+      - name: Install the Rust toolchain
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: false
+          rustflags: ""
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          workspaces: zebra
+          key: swarm-zebrad-internal-miner
+          cache-on-failure: true
+
+      # The official Zebra image has no internal miner, which is the whole
+      # reason this stack builds its own. Nothing but the feature flag differs
+      # from the release: no source, manifest or lockfile change, and --locked.
+      - name: Build zebrad with the internal miner
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: zebra
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package zebrad --bin zebrad --features "${ZEBRA_FEATURES}"
+          mkdir -p ../out
+          cp target/release/zebrad ../out/zebrad
+
+      - name: Report
+        run: |
+          set -euo pipefail
+          chmod +x out/zebrad
+          out/zebrad --version
+          sha256sum out/zebrad | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swarm-bin-zebrad
+          path: out/zebrad
+          if-no-files-found: error
+          retention-days: 7
+
+  zainod:
+    name: zainod
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve the pinned revision
+        id: resolve
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote "https://github.com/${ZAINO_REPO}.git" "${ZAINO_REF}" | cut -f1 | head -n 1)"
+          [ -n "${sha}" ] || { echo "::error::cannot resolve ${ZAINO_REPO}@${ZAINO_REF}"; exit 1; }
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "${ZAINO_REPO}@${ZAINO_REF} = ${sha}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Restore the built binary
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/zainod
+          key: swarm-bin-zainod-${{ steps.resolve.outputs.sha }}-ubuntu2204
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          repository: ${{ env.ZAINO_REPO }}
+          ref: ${{ steps.resolve.outputs.sha }}
+          path: zaino
+          persist-credentials: false
+
+      - name: Install build prerequisites
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -qq update
+          sudo apt-get -o Acquire::Retries=3 -qq install -y --no-install-recommends \
+            clang libclang-dev cmake make pkg-config protobuf-compiler
+
+      - name: Install the Rust toolchain
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: false
+          rustflags: ""
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          workspaces: zaino
+          key: swarm-zainod
+          cache-on-failure: true
+
+      # The default feature set on purpose: the deployed indexer keeps
+      # upstream's refusal to serve plaintext gRPC on a non-private address,
+      # and the container entrypoint satisfies that guard by binding the
+      # container's own RFC1918 address rather than compiling the guard out.
+      - name: Build zainod
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: zaino
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package zainod --bin zainod
+          mkdir -p ../out
+          cp target/release/zainod ../out/zainod
+
+      - name: Report
+        run: |
+          set -euo pipefail
+          chmod +x out/zainod
+          out/zainod --version
+          sha256sum out/zainod | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swarm-bin-zainod
+          path: out/zainod
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # The stack itself.
+  # --------------------------------------------------------------------------
+  stack:
+    name: Stand the stack up
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [lint, zebrad, zainod]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: swarm-bin-zebrad
+          path: deploy/swarm/bin
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: swarm-bin-zainod
+          path: deploy/swarm/bin
+
+      - name: Prepare the throwaway deployment
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          chmod +x bin/zebrad bin/zainod
+          bin/zebrad --version
+          bin/zainod --version
+
+          # The throwaway network: its own name and magic, so a node running it
+          # cannot reach SwarmTestnet, and a genesis that is not the real one.
+          cp -a config/example config/live
+          ls -l config/live
+
+          cp .env.example .env
+          {
+            echo '# --- CI overrides ---'
+            # No public address: the runner has no reachable one, and a seed
+            # node advertising a runner address would be nonsense.
+            echo 'SWARM_PUBLIC_IP='
+            # A well-known Zcash test address. Nobody should expect to control
+            # it, which is exactly right for a chain that is deleted minutes
+            # from now.
+            echo 'SWARM_MINER_ADDRESS=tmSRd1r8gs77Ja67Fw1JcdoXytxsyrLTPJm'
+            echo 'SWARM_ACME_EMAIL=ops@example.invalid'
+            echo 'SWARM_LWD_DOMAIN=lwd.example.invalid'
+            echo 'SWARM_CONFIG_DIR=./config/live'
+            # The runner has more cores than the server; the point of the test
+            # is the *shape* of the limits, so keep the server's values.
+            echo 'SWARM_COOKIE_POLL_SECONDS=3'
+            echo 'SWARM_COOKIE_MISSING_GRACE_SECONDS=30'
+          } >> .env
+
+      - name: Build the images
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env build zebra zaino init-genesis
+          docker image ls | grep -E 'swarm-(zebra|zaino|ops)'
+
+      # Caddy is left out: there is no DNS for lwd.swarm.green pointing here,
+      # so it could only fail to obtain a certificate. `docker compose up zaino`
+      # starts its dependencies - the node and the one-shot genesis job.
+      - name: Start the node, submit genesis and start the indexer
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env up -d --wait --wait-timeout 420 zaino
+          docker compose --env-file .env ps -a
+
+      - name: The genesis job ran, submitted once, and verified
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          log="$(docker compose --env-file .env logs init-genesis)"
+          printf '%s\n' "${log}"
+          grep -q 'database is empty; submitting genesis' <<<"${log}" \
+            || { echo "::error::the genesis job did not submit a block into the empty database"; exit 1; }
+          grep -q 'genesis confirmed at height 0: 01d6e85dd3c1c128941a849c5025cd2e437258811a2551b82aefd68686c982e1' <<<"${log}" \
+            || { echo "::error::the genesis job did not confirm the manifest hash"; exit 1; }
+
+      - name: The resource limits are applied
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          for service in zebra zaino; do
+            id="$(docker compose --env-file .env ps -q "${service}")"
+            docker inspect "${id}" \
+              --format "${service}: NanoCpus={{.HostConfig.NanoCpus}} Memory={{.HostConfig.Memory}} MemoryReservation={{.HostConfig.MemoryReservation}}"
+            memory="$(docker inspect "${id}" --format '{{.HostConfig.Memory}}')"
+            [ "${memory}" -gt 0 ] \
+              || { echo "::error::${service} has no memory limit; compose did not apply deploy.resources"; exit 1; }
+          done
+
+      - name: The internal miner produces blocks
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          target="${SWARM_CI_TARGET_HEIGHT:-3}"
+          deadline=$(( $(date +%s) + 900 ))
+          height=0
+          while [ "${height}" -lt "${target}" ]; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::the internal miner reached height ${height} of ${target} within the time limit"
+              exit 1
+            fi
+            sleep 10
+            info="$(docker compose --env-file .env run --rm --no-deps -T init-genesis \
+              swarm-rpc getblockchaininfo || true)"
+            height="$(jq -r '.result.blocks // 0' <<<"${info}" 2>/dev/null || echo 0)"
+            echo "height ${height}"
+          done
+          echo "reached height ${height}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: GetLightdInfo over plain h2c reports swarm-testnet
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          info="$(docker compose --env-file .env run --rm --no-deps -T init-genesis \
+            swarm-lightd-info h2c://zaino:8137)"
+          printf '%s\n' "${info}"
+          chain="$(jq -r '.chain_name' <<<"${info}")"
+          [ "${chain}" = "swarm-testnet" ] \
+            || { echo "::error::the indexer reports chain_name '${chain}', expected 'swarm-testnet'"; exit 1; }
+          [ "$(jq -r '.block_height' <<<"${info}")" -ge 1 ] \
+            || { echo "::error::the indexer reports no blocks"; exit 1; }
+          {
+            echo '### GetLightdInfo over h2c'
+            echo '```json'
+            printf '%s\n' "${info}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: The node still holds the expected genesis
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          response="$(docker compose --env-file .env run --rm --no-deps -T init-genesis \
+            swarm-rpc getblockhash '[0]')"
+          hash="$(jq -r '.result' <<<"${response}")"
+          expected="$(jq -r '.genesis_hash' config/live/manifest.json)"
+          [ "${hash}" = "${expected}" ] \
+            || { echo "::error::node genesis ${hash} != manifest ${expected}"; exit 1; }
+          echo "genesis ${hash}"
+
+      # The design this is here to prove: the node writes a fresh RPC cookie on
+      # every start, and the indexer reads it once. Without the watcher, the
+      # indexer would stay up authenticating with a secret that no longer
+      # exists - alive and serving nothing.
+      - name: The indexer follows a rotated RPC cookie
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          before="$(docker compose --env-file .env ps -q zaino)"
+          started_before="$(docker inspect "${before}" --format '{{.State.StartedAt}}')"
+          echo "indexer started at ${started_before}"
+
+          docker compose --env-file .env restart zebra
+
+          echo '--- waiting for the indexer to notice and restart ---'
+          deadline=$(( $(date +%s) + 300 ))
+          restarted=0
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            sleep 5
+            id="$(docker compose --env-file .env ps -q zaino || true)"
+            [ -n "${id}" ] || continue
+            started_now="$(docker inspect "${id}" --format '{{.State.StartedAt}}' 2>/dev/null || true)"
+            if [ -n "${started_now}" ] && [ "${started_now}" != "${started_before}" ]; then
+              restarted=1
+              break
+            fi
+          done
+
+          docker compose --env-file .env logs zaino | tail -n 40
+          [ "${restarted}" -eq 1 ] \
+            || { echo "::error::the indexer did not restart after the node rotated its cookie"; exit 1; }
+
+          echo '--- waiting for the indexer to serve again ---'
+          docker compose --env-file .env up -d --wait --wait-timeout 300 zaino
+          info="$(docker compose --env-file .env run --rm --no-deps -T init-genesis \
+            swarm-lightd-info h2c://zaino:8137)"
+          printf '%s\n' "${info}"
+          [ "$(jq -r '.chain_name' <<<"${info}")" = "swarm-testnet" ] \
+            || { echo "::error::the indexer did not recover after the cookie rotation"; exit 1; }
+
+      - name: Export the images the server will load
+        working-directory: deploy/swarm
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for image in swarm-zebra:local swarm-zaino:local swarm-ops:local; do
+            name="${image%%:*}"
+            docker save "${image}" | gzip -9 > "dist/${name}.tar.gz"
+          done
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          {
+            echo '### Image tarballs'
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Collect the logs
+        if: always()
+        working-directory: deploy/swarm
+        run: |
+          set -uo pipefail
+          mkdir -p logs
+          docker compose --env-file .env ps -a > logs/ps.txt 2>&1 || true
+          for service in zebra init-genesis zaino; do
+            docker compose --env-file .env logs --no-color "${service}" > "logs/${service}.log" 2>&1 || true
+          done
+          tail -n 60 logs/zebra.log || true
+
+      - name: Tear the throwaway network down
+        if: always()
+        working-directory: deploy/swarm
+        run: docker compose --env-file .env down --volumes --remove-orphans || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: swarm-stack-logs
+          path: deploy/swarm/logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swarm-images-x86_64-linux
+          path: deploy/swarm/dist
+          if-no-files-found: error
+          retention-days: 30

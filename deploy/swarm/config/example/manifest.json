@@ -1,0 +1,13 @@
+{
+  "network_name": "SwarmCiTestnet",
+  "network_magic": [83, 87, 67, 73],
+  "genesis_hash": "01d6e85dd3c1c128941a849c5025cd2e437258811a2551b82aefd68686c982e1",
+  "genesis_hex_file": "genesis.hex",
+  "lightwallet_chain_name": "swarm-testnet",
+  "p2p_port": 18233,
+  "rpc_port": 18232,
+  "purpose": "Throwaway fixture for CI and for the first run on a fresh server. NOT SwarmTestnet: different name and magic, so the two networks cannot connect.",
+  "genesis_provenance": "The deterministic engineering genesis of the retired PrivacyTestnetV2 lab network: the upstream historical genesis coinbase with time 1789862400, compact target 2007ffff and the first Equihash 200,9 solution found from a zero nonce. Reused unchanged because a configured testnet with the same target limit and activation schedule accepts it. No key material, no spendable output.",
+  "funding_streams": "none - the 80/8/4/8 split needs three P2SH t2 destinations that do not exist yet, so this fixture does not exercise it",
+  "not_for": "public deployment"
+}

@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Day-to-day operation of the SWARM stack. Runs on the server.
+#
+#   /opt/swarm/scripts/swarm-stack <command> [arguments]
+#
+# Everything here is a thin, documented wrapper over docker compose, so any of
+# it can be done by hand. The wrappers exist for the operations where the order
+# matters or a mistake is expensive: rotating the miner address, backing up the
+# chain, and restoring it.
+set -euo pipefail
+
+stack_dir="${SWARM_REMOTE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "${stack_dir}"
+
+compose() { docker compose --env-file .env "$@"; }
+die() { printf 'swarm-stack: %s\n' "$1" >&2; exit 1; }
+
+project="$(grep -E '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2- | tr -d '\r' || true)"
+project="${project:-swarm-testnet}"
+backup_dir="${SWARM_BACKUP_DIR:-${stack_dir}/backups}"
+
+usage() {
+    cat <<'USAGE'
+swarm-stack <command>
+
+  status                  services, heights, peers and disk in one screen
+  health                  the full deploy-time health check
+  start                   start everything (converges to the compose file)
+  stop                    stop everything, leaving the data volumes alone
+  restart [service]       restart one service, or all of them
+  logs [service] [-f]     tail the logs
+  rpc <method> [params]   one authenticated JSON-RPC call to the node
+  lightd [target]         GetLightdInfo, h2c inside the network by default
+
+  rotate-miner <address>  change the miner payout address and restart the node
+  update-binary <kind> <image.tar.gz>
+                          load a new zebra|zaino|ops image tarball and restart
+  backup [name]           stop, archive the chain and indexer volumes, start
+  restore <archive>       restore a chain archive over an empty stack
+  prune                   remove untagged images and build cache
+
+Every command is safe to run twice.
+USAGE
+}
+
+command="${1:-status}"
+shift || true
+
+case "${command}" in
+status)
+    printf '== services ==\n'
+    compose ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
+    printf '\n== chain ==\n'
+    if info="$(compose run --rm --no-deps -T init-genesis swarm-rpc getblockchaininfo 2>/dev/null)"; then
+        jq -r '"  height      \(.result.blocks)
+  tip         \(.result.bestblockhash)
+  difficulty  \(.result.difficulty)
+  chain       \(.result.chain)"' <<<"${info}" 2>/dev/null || printf '  %s\n' "${info}"
+    else
+        printf '  the node did not answer\n'
+    fi
+    peers="$(compose run --rm --no-deps -T init-genesis swarm-rpc getpeerinfo 2>/dev/null \
+        | jq -r '.result | length' 2>/dev/null || echo '?')"
+    printf '  peers       %s\n' "${peers}"
+    printf '\n== indexer ==\n'
+    compose run --rm --no-deps -T init-genesis \
+        swarm-lightd-info "h2c://zaino:$(grep -E '^SWARM_ZAINO_GRPC_PORT=' .env | cut -d= -f2 || echo 8137)" \
+        2>/dev/null | jq -r '"  chain_name  \(.chain_name)
+  height      \(.block_height)
+  vendor      \(.vendor)
+  version     \(.version)"' 2>/dev/null || printf '  the indexer did not answer\n'
+    printf '\n== host ==\n'
+    free -m | awk '/^Mem:|^Swap:/ {printf "  %-6s %5s MB total %5s MB used\n", $1, $2, $3}'
+    df -h / | awk 'NR==2 {printf "  disk   %s used of %s (%s)\n", $3, $2, $5}'
+    ;;
+
+health)
+    exec bash "${stack_dir}/scripts/healthcheck.sh" "$@"
+    ;;
+
+start)
+    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" "$@"
+    compose ps -a
+    ;;
+
+stop)
+    # `stop`, never `down -v`: the chain lives in the volumes.
+    compose stop "$@"
+    ;;
+
+restart)
+    compose restart "$@"
+    ;;
+
+logs)
+    compose logs --no-color --tail "${SWARM_LOG_TAIL:-200}" "$@"
+    ;;
+
+rpc)
+    [ $# -ge 1 ] || die 'usage: swarm-stack rpc <method> [json-params]'
+    compose run --rm --no-deps -T init-genesis swarm-rpc "$@"
+    ;;
+
+lightd)
+    target="${1:-h2c://zaino:$(grep -E '^SWARM_ZAINO_GRPC_PORT=' .env | cut -d= -f2 || echo 8137)}"
+    compose run --rm --no-deps -T init-genesis swarm-lightd-info "${target}"
+    ;;
+
+rotate-miner)
+    address="${1:?usage: swarm-stack rotate-miner <address>}"
+    # Nothing is re-rendered: the payout is a property of this deployment, not
+    # of the chain, so it lives in .env and only the node restarts.
+    cp .env ".env.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    if grep -qE '^SWARM_MINER_ADDRESS=' .env; then
+        sed -i "s|^SWARM_MINER_ADDRESS=.*|SWARM_MINER_ADDRESS=${address}|" .env
+    else
+        printf 'SWARM_MINER_ADDRESS=%s\n' "${address}" >> .env
+    fi
+    printf 'miner address set to %s\n' "${address}"
+    # `up -d` recreates the node with the new environment; `restart` would not.
+    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" zebra
+    printf 'the node was recreated. Blocks found from now on pay the new address;\n'
+    printf 'anything already mined still pays the old one.\n'
+    ;;
+
+update-binary)
+    kind="${1:?usage: swarm-stack update-binary <zebra|zaino|ops> <image.tar.gz>}"
+    tarball="${2:?usage: swarm-stack update-binary <zebra|zaino|ops> <image.tar.gz>}"
+    case "${kind}" in zebra|zaino|ops) ;; *) die "kind must be zebra, zaino or ops" ;; esac
+    [ -r "${tarball}" ] || die "no readable ${tarball}"
+    docker load < "${tarball}"
+    case "${kind}" in
+        ops) printf 'the ops image is used by the one-shot job only; nothing to restart\n' ;;
+        *) compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" "${kind}" ;;
+    esac
+    docker image prune -f
+    ;;
+
+backup)
+    name="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
+    mkdir -p "${backup_dir}"
+    printf 'stopping the stack so the databases are archived at rest\n'
+    compose stop
+    for volume in chain zaino; do
+        archive="${backup_dir}/${project}-${volume}-${name}.tar.gz"
+        printf 'archiving %s-%s -> %s\n' "${project}" "${volume}" "${archive}"
+        docker run --rm \
+            -v "${project}-${volume}:/source:ro" \
+            -v "${backup_dir}:/backup" \
+            alpine:3 tar -czf "/backup/$(basename "${archive}")" -C /source .
+    done
+    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}"
+    ls -lh "${backup_dir}" | sed 's/^/  /'
+    printf '\nCopy these off the server. A backup that lives only on the machine\n'
+    printf 'it backs up is not a backup.\n'
+    ;;
+
+restore)
+    archive="${1:?usage: swarm-stack restore <chain-archive.tar.gz>}"
+    [ -r "${archive}" ] || die "no readable ${archive}"
+    volume="${project}-chain"
+    case "${archive}" in *-zaino-*) volume="${project}-zaino" ;; esac
+    printf 'this will REPLACE the contents of the volume %s\n' "${volume}"
+    printf 'press Ctrl-C within 10 seconds to abort\n'
+    sleep 10
+    compose down
+    docker volume rm "${volume}" >/dev/null 2>&1 || true
+    docker volume create "${volume}" >/dev/null
+    docker run --rm \
+        -v "${volume}:/target" \
+        -v "$(cd "$(dirname "${archive}")" && pwd):/backup:ro" \
+        alpine:3 tar -xzf "/backup/$(basename "${archive}")" -C /target
+    printf 'restored. Starting the stack; the genesis job will verify the hash.\n'
+    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}"
+    ;;
+
+prune)
+    docker image prune -f
+    docker builder prune -f 2>/dev/null || true
+    docker system df
+    ;;
+
+-h|--help|help)
+    usage
+    ;;
+
+*)
+    usage >&2
+    die "unknown command '${command}'"
+    ;;
+esac
