@@ -6,6 +6,10 @@
 # protobuf fields of a GetLightdInfo response without pulling in grpcurl and
 # the lightwallet protos - and for nothing else.
 #
+# `python3`, not `python3-minimal`: the minimal package omits most of the
+# standard library, including `json`, which the decoder needs to print its
+# result. The difference is about 25 MB and one confusing ImportError.
+#
 # Build context: deploy/swarm
 FROM debian:bookworm-slim
 
@@ -18,7 +22,7 @@ RUN apt-get -o Acquire::Retries=3 update \
         ca-certificates \
         curl \
         jq \
-        python3-minimal \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # The same uid as the node, so the 0600 RPC cookie in the shared volume is

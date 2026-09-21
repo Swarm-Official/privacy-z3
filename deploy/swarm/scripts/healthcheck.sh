@@ -107,10 +107,25 @@ else
     else
         fail "the indexer reports chain_name '${chain:-none}', expected '${expected_chain}'"
     fi
-    # The indexer verifies the node's genesis and upgrade schedule against its
-    # own configuration before it opens the index, and refuses to start if
-    # either disagrees. So a serving indexer is itself the genesis check.
+    # The indexer fetches height zero from the node and compares its hash and
+    # the node's whole upgrade schedule against its own configuration before it
+    # opens the index, and refuses to start if either disagrees. So an indexer
+    # that is serving at all has already made the genesis assertion - there is
+    # no way to be served by it and be on the wrong chain.
     pass "the indexer accepted the node's genesis and schedule (it is serving at height ${indexer_height})"
+
+    # Belt and braces, over the wire rather than from its startup: the chain
+    # facts it reports have to be the ones the node reports.
+    node_branch="$(ops swarm-rpc getblockchaininfo 2>/dev/null \
+        | jq -r '.result.consensus.chaintip // empty' || true)"
+    wire_branch="$(jq -r '.consensus_branch_id // empty' <<<"${lightd}")"
+    if [ -n "${node_branch}" ] && [ "${node_branch}" = "${wire_branch}" ]; then
+        pass "consensus branch ${wire_branch} agrees with the node"
+    elif [ -z "${node_branch}" ]; then
+        skip 'the node did not report a consensus branch to compare'
+    else
+        fail "the indexer reports branch '${wire_branch}', the node reports '${node_branch}'"
+    fi
     jq . <<<"${lightd}" | sed 's/^/        /'
 fi
 
