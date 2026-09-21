@@ -58,7 +58,9 @@ else
 fi
 
 printf '\n== chain ==\n'
-expected_genesis="$(jq -r '.genesis_hash' "${config_dir}/manifest.json" 2>/dev/null || echo '')"
+# The network manifest nests it under `genesis.hash`; the throwaway fixture
+# has it flat. Both are read, so one healthcheck serves both.
+expected_genesis="$(jq -r '.genesis.hash // .genesis_hash // empty' "${config_dir}/manifest.json" 2>/dev/null || echo '')"
 actual_genesis="$(ops swarm-rpc getblockhash '[0]' 2>/dev/null | jq -r '.result // empty' || true)"
 if [ -n "${expected_genesis}" ] && [ "${actual_genesis}" = "${expected_genesis}" ]; then
     pass "genesis ${actual_genesis}"

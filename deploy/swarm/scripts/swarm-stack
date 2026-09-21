@@ -32,6 +32,9 @@ swarm-stack <command>
   rpc <method> [params]   one authenticated JSON-RPC call to the node
   lightd [target]         GetLightdInfo, h2c inside the network by default
 
+  enable-explorer         serve explore.swarm.green: checks DNS points here,
+                          uncomments the Caddy block, starts the service and
+                          reloads Caddy - refuses if DNS is not ready
   rotate-miner <address>  change the miner payout address and restart the node
   update-binary <kind> <image.tar.gz>
                           load a new zebra|zaino|ops image tarball and restart
@@ -94,6 +97,8 @@ shift || true
 
 case "${command}" in
 status)
+    # Read-only, and it never prints the RPC cookie: swarm-rpc reads the cookie
+    # file itself and only the answers come back here.
     printf '== services ==\n'
     compose ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
     printf '\n== chain ==\n'
@@ -101,13 +106,17 @@ status)
         jq -r '"  height      \(.result.blocks)
   tip         \(.result.bestblockhash)
   difficulty  \(.result.difficulty)
+  bits        \(.result.bits // "n/a")
   chain       \(.result.chain)"' <<<"${info}" 2>/dev/null || printf '  %s\n' "${info}"
+        genesis="$(compose run --rm --no-deps -T init-genesis swarm-rpc getblockhash '[0]' 2>/dev/null \
+            | jq -r '.result // "unreadable"' 2>/dev/null || echo unreadable)"
+        printf '  genesis     %s\n' "${genesis}"
     else
         printf '  the node did not answer\n'
     fi
     peers="$(compose run --rm --no-deps -T init-genesis swarm-rpc getpeerinfo 2>/dev/null \
         | jq -r '.result | length' 2>/dev/null || echo '?')"
-    printf '  peers       %s\n' "${peers}"
+    printf '  peers       %s   (zero is normal while this is the only node)\n' "${peers}"
     printf '\n== indexer ==\n'
     compose run --rm --no-deps -T init-genesis \
         swarm-lightd-info "h2c://zaino:$(grep -E '^SWARM_ZAINO_GRPC_PORT=' .env | cut -d= -f2 || echo 8137)" \
@@ -115,7 +124,12 @@ status)
   height      \(.block_height)
   vendor      \(.vendor)
   version     \(.version)"' 2>/dev/null || printf '  the indexer did not answer\n'
+    printf '\n== containers ==\n'
+    docker stats --no-stream --format '  {{.Name}}  cpu {{.CPUPerc}}  mem {{.MemUsage}}' 2>/dev/null \
+        | grep -E "$(basename "${stack_dir}")|${project}" || \
+        docker stats --no-stream --format '  {{.Name}}  cpu {{.CPUPerc}}  mem {{.MemUsage}}' 2>/dev/null
     printf '\n== host ==\n'
+    printf '  uptime %s\n' "$(uptime -p 2>/dev/null || true)"
     free -m | awk '/^Mem:|^Swap:/ {printf "  %-6s %5s MB total %5s MB used\n", $1, $2, $3}'
     df -h / | awk 'NR==2 {printf "  disk   %s used of %s (%s)\n", $3, $2, $5}'
     ;;
@@ -218,6 +232,51 @@ restore)
         alpine:3 tar -xzf "/backup/$(basename "${archive}")" -C /target
     printf 'restored. Starting the stack; the genesis job will verify the hash.\n'
     stack_start
+    ;;
+
+enable-explorer)
+    # One command, because the order matters and every part of it is easy to
+    # get wrong by hand: the certificate authority must not be asked for a name
+    # that does not point here (a failed order counts against the rate limit),
+    # the service must be running before the proxy sends traffic to it, and the
+    # block must parse before Caddy is told to reload.
+    expected_ip="${SWARM_PUBLIC_IP:-$(grep -E '^SWARM_PUBLIC_IP=' .env | cut -d= -f2- | tr -d '\r')}"
+    domain="$(grep -E '^SWARM_EXPLORE_DOMAIN=' .env | cut -d= -f2- | tr -d '\r')"
+    [ -n "${domain}" ] || die 'SWARM_EXPLORE_DOMAIN is not set in .env'
+
+    # getent exits 2 when the name does not resolve, which under `set -e` would
+    # end this script silently - exactly in the case the check exists for.
+    resolved="$(getent ahostsv4 "${domain}" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
+    if [ "${resolved}" != "${expected_ip}" ]; then
+        die "${domain} resolves to '${resolved:-nothing}', not ${expected_ip}.
+  Move the A record first. Asking for a certificate now would fail, and failed
+  orders count against Let's Encrypt's rate limits. Re-run this afterwards."
+    fi
+    printf '%s resolves to this server\n' "${domain}"
+
+    grep -q 'EXPLORER-BLOCK-BEGIN' Caddyfile || die 'the Caddyfile has no explorer block markers'
+    if awk '/EXPLORER-BLOCK-BEGIN/{f=1;next} /EXPLORER-BLOCK-END/{f=0} f' Caddyfile | grep -qv '^#'; then
+        printf 'the explorer block is already enabled\n'
+    else
+        cp Caddyfile "Caddyfile.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        # Strip the leading comment marker from the block's lines only.
+        awk '
+            /EXPLORER-BLOCK-BEGIN/ {print; inblock=1; next}
+            /EXPLORER-BLOCK-END/   {print; inblock=0; next}
+            inblock                {sub(/^# ?/, ""); print; next}
+            {print}
+        ' Caddyfile > Caddyfile.enabled && mv Caddyfile.enabled Caddyfile
+        printf 'uncommented the explorer block\n'
+    fi
+
+    compose --profile explorer up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" explorer
+
+    # Validate before reloading: a bad Caddyfile on reload leaves the running
+    # config in place, but it also leaves you guessing.
+    compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+    printf 'caddy reloaded; it will request a certificate for %s on the first request\n' "${domain}"
+    printf 'check it from elsewhere:  curl -sSI https://%s/\n' "${domain}"
     ;;
 
 prune)
