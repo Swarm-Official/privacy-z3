@@ -138,6 +138,17 @@ status)
     docker stats --no-stream --format '  {{.Name}}  cpu {{.CPUPerc}}  mem {{.MemUsage}}' 2>/dev/null \
         | grep -E "$(basename "${stack_dir}")|${project}" || \
         docker stats --no-stream --format '  {{.Name}}  cpu {{.CPUPerc}}  mem {{.MemUsage}}' 2>/dev/null
+    # Anything running here that compose does not know about. A `docker run`
+    # whose ssh session died leaves the container behind - `--rm` only fires on
+    # exit - and `docker compose ps` will never mention it.
+    orphans="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' \
+        | grep -v "^${project}-" || true)"
+    if [ -n "${orphans}" ]; then
+        printf '\n== containers NOT part of this stack ==\n'
+        printf '%s\n' "${orphans}" | sed 's/^/  /'
+        printf '  (a leftover `docker run` costs CPU on a 2-vCPU box; remove it when done)\n'
+    fi
+
     # The one number that says something crashed while nobody was looking.
     printf '\n== restarts ==\n'
     for service in zebra zaino explorer caddy status; do
