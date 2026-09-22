@@ -146,10 +146,22 @@ def build() -> dict:
     except Exception as error:
         node["error"] = type(error).__name__
 
+    # How many, never who. `getpeerinfo` returns one entry per connected peer
+    # and every entry carries that peer's address; only the length of the list
+    # leaves this machine, and the list itself is not held on to.
+    #
+    # The timestamp is the moment of the count, not the moment the file was
+    # written. The header walk above makes up to 101 RPC calls and can take a
+    # few seconds, so a reader showing this as "right now" deserves to know
+    # how old "now" is.
     try:
-        node["peers"] = len(rpc("getpeerinfo"))
+        peers = rpc("getpeerinfo")
+        node["peers"] = len(peers)
+        node["peers_updated"] = utc(time.time())
+        del peers
     except Exception:
         node["peers"] = None
+        node["peers_updated"] = None
 
     status["node"] = node
 
