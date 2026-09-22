@@ -1,7 +1,7 @@
 # The SWARM seed node: the prebuilt `zebrad` in a slim runtime image.
 #
 # No compiler and no source. `bin/zebrad` is the artifact of the "SWARM native
-# binaries" workflow in brs-holding/privacy-zebra: the official Zebra v6.3.0
+# binaries" workflow in Swarm-Official/privacy-zebra: the official Zebra v6.3.0
 # tag built with `--locked` plus the optional `internal-miner` feature, and
 # nothing else changed. The official zfnd/zebra image cannot be used because
 # that feature is not in it.

@@ -17,9 +17,9 @@ stack_dir="$(cd "${here}/.." && pwd)"
 
 OUT="${stack_dir}/dist"
 WHAT="images"
-Z3_REPO="${SWARM_Z3_REPO:-brs-holding/privacy-z3}"
-ZEBRA_REPO="${SWARM_ZEBRA_REPO:-brs-holding/privacy-zebra}"
-ZAINO_REPO="${SWARM_ZAINO_REPO:-brs-holding/privacy-zaino}"
+Z3_REPO="${SWARM_Z3_REPO:-Swarm-Official/privacy-z3}"
+ZEBRA_REPO="${SWARM_ZEBRA_REPO:-Swarm-Official/privacy-zebra}"
+ZAINO_REPO="${SWARM_ZAINO_REPO:-Swarm-Official/privacy-zaino}"
 RUN_ID=""
 
 die() { printf 'fetch-artifacts: %s\n' "$1" >&2; exit 1; }

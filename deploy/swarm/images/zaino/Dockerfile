@@ -1,7 +1,7 @@
 # The SWARM light-wallet indexer: the prebuilt `zainod` in a slim runtime image.
 #
 # No compiler and no source. `bin/zainod` is the artifact of the "SWARM zainod
-# binary" workflow in brs-holding/privacy-zaino, branch swarm-testnet-support:
+# binary" workflow in Swarm-Official/privacy-zaino, branch swarm-testnet-support:
 # the default feature set, built with `--locked`, reporting the chain label
 # `swarm-testnet` to light wallets.
 #

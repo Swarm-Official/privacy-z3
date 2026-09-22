@@ -38,10 +38,10 @@ env:
 
   # The two binaries the images copy in. Pinned here, and recorded in each
   # image's build manifest, so a deployed server can be traced back to source.
-  ZEBRA_REPO: brs-holding/privacy-zebra
+  ZEBRA_REPO: Swarm-Official/privacy-zebra
   ZEBRA_REF: v6.3.0
   ZEBRA_FEATURES: internal-miner
-  ZAINO_REPO: brs-holding/privacy-zaino
+  ZAINO_REPO: Swarm-Official/privacy-zaino
   ZAINO_REF: swarm-testnet-support
 
 jobs:

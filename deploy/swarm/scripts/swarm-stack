@@ -413,11 +413,32 @@ enable-explorer)
             /EXPLORER-BLOCK-END/   {print; inblock=0; next}
             inblock                {sub(/^# ?/, ""); print; next}
             {print}
-        ' Caddyfile > Caddyfile.enabled && mv Caddyfile.enabled Caddyfile
+        ' Caddyfile > Caddyfile.enabled
+        # NEVER `mv` onto this file. Compose bind-mounts it as a single file,
+        # which pins the container to the *inode*; a rename puts a new inode at
+        # the path and the container keeps reading the old one. `caddy validate`
+        # and `caddy reload` run inside that container, so both would read the
+        # stale file and report success, and the explorer would quietly not be
+        # served. `cat` truncates and rewrites in place, so the inode - and the
+        # mount - survive. This cost a live debugging session on 2026-09-22.
+        cat Caddyfile.enabled > Caddyfile && rm -f Caddyfile.enabled
         printf 'uncommented the explorer block\n'
     fi
 
     compose --profile explorer up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" explorer
+
+    # Prove the container is looking at the file that was just edited. Both
+    # commands below run *inside* the container, so if the bind mount has been
+    # detached from the path - see the note above - they would validate and
+    # approve the old file and nothing would change.
+    host_sum="$(sha256sum Caddyfile | cut -d' ' -f1)"
+    container_sum="$(compose exec -T caddy sha256sum /etc/caddy/Caddyfile | cut -d' ' -f1 | tr -d '\r')"
+    [ "${host_sum}" = "${container_sum}" ] || die "caddy is serving a different Caddyfile than the one on disk.
+  host      ${host_sum}
+  container ${container_sum}
+  Something renamed the file instead of rewriting it, so the bind mount still
+  points at the old inode. Re-bind it and run this again:
+    docker compose --env-file .env up -d --force-recreate --no-deps caddy"
 
     # Validate before reloading: a bad Caddyfile on reload leaves the running
     # config in place, but it also leaves you guessing.

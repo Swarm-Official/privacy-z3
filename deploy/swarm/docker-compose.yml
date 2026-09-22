@@ -272,7 +272,7 @@ services:
   # the owner's previous site, so the Caddy block for it is commented out and
   # no certificate is requested for a name this server does not serve.
   #
-  # The image comes from brs-holding/swarm-explorer as a `docker save` tarball,
+  # The image comes from Swarm-Official/swarm-explorer as a `docker save` tarball,
   # exactly like the zebra and zaino images: nothing is built here.
   #
   # To enable:
