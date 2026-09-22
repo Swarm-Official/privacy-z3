@@ -239,7 +239,18 @@ update-binary)
     [ -r "${tarball}" ] || die "no readable ${tarball}"
     docker load < "${tarball}"
     case "${kind}" in
-        ops) printf 'the ops image is used by the one-shot job only; nothing to restart\n' ;;
+        ops)
+            # This used to say the ops image was the one-shot job's alone and
+            # that nothing needed restarting. That stopped being true when the
+            # status generator was added: it is long-running and it runs from
+            # this image, so a freshly loaded image would sit there doing
+            # nothing while the old code kept serving. --force-recreate because
+            # the tag does not change, and a stale container that looks current
+            # is the hardest kind of wrong to notice.
+            compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" \
+                --force-recreate --no-deps status
+            printf 'the status generator was recreated; the one-shot jobs take the new image on their next run\n'
+            ;;
         *) compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" "${kind}" ;;
     esac
     docker image prune -f
