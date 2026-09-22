@@ -86,6 +86,35 @@
 }
 
 # ---------------------------------------------------------------------------
+# EXPLORER, INTERIM, on the light-wallet name at port 8443.
+#
+# explore.swarm.green has no DNS record yet and the owner wants to see the
+# explorer today. This serves it on a name the server already holds a
+# certificate for, on a port of its own so it cannot collide with the gRPC
+# service on 443.
+#
+# REMOVE THIS BLOCK once explore.swarm.green is live: two public addresses for
+# one service is two things to keep right, and the second one is a port people
+# will paste into places it does not belong.
+#
+# Same hardening as the real block, including the /broadcast refusal - the
+# explorer's only write path to the chain does not become reachable just
+# because the door is temporary.
+# ---------------------------------------------------------------------------
+{$SWARM_LWD_DOMAIN}:8443 {
+	import swarm_hsts
+	encode zstd gzip
+
+	handle /broadcast* {
+		respond "transaction broadcast is not enabled on this server" 403
+	}
+
+	handle {
+		reverse_proxy explorer:{$SWARM_EXPLORER_PORT}
+	}
+}
+
+# ---------------------------------------------------------------------------
 # EXPLORER - DISABLED.
 #
 # `explore.swarm.green` still resolves to the owner's previous site. Until that

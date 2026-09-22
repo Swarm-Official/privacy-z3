@@ -248,6 +248,9 @@ services:
     ports:
       - "80:80/tcp"
       - "443:443/tcp"
+      # Interim: the explorer on the light-wallet name until explore.swarm.green
+      # exists. Remove this line and the matching Caddy block together.
+      - "${SWARM_EXPLORER_INTERIM_PORT:-8443}:8443/tcp"
     depends_on:
       zaino:
         condition: service_started
@@ -306,7 +309,12 @@ services:
       SECRET_KEY_BASE: ${SWARM_EXPLORER_SECRET_KEY_BASE:-}
       SESSION_SIGNING_SALT: ${SWARM_EXPLORER_SESSION_SIGNING_SALT:-}
       LIVE_VIEW_SIGNING_SALT: ${SWARM_EXPLORER_LIVE_VIEW_SIGNING_SALT:-}
-      EXPLORER_HOSTNAME: ${SWARM_EXPLORE_DOMAIN:-explore.invalid}
+      # The name the explorer is served under RIGHT NOW, which during the
+      # interim is the light-wallet name on port 8443. Deliberately not
+      # SWARM_EXPLORE_DOMAIN: that one names the future home and is what
+      # enable-explorer checks DNS for, and overloading it would make that
+      # gate pass against the wrong name.
+      EXPLORER_HOSTNAME: ${SWARM_EXPLORER_PUBLIC_HOST:-${SWARM_EXPLORE_DOMAIN:-explore.invalid}}
       EXPLORER_SCHEME: ${SWARM_EXPLORER_SCHEME:-https}
       EXPLORER_PORT: ${SWARM_EXPLORER_PUBLIC_PORT:-443}
       PORT: ${SWARM_EXPLORER_PORT:-4000}
