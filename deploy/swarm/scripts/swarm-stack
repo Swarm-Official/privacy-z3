@@ -269,41 +269,46 @@ enable-explorer)
 
     # ---------------------------------------------------------------------
     # Phoenix secrets, checked before DNS: this one is cheap and reversible,
-    # and moving the A record is neither. The explorer signs session and
-    # LiveView tokens, and the values upstream ships for development are in a
-    # public repository.
+    # and moving the A record is neither. The explorer signs session cookies
+    # and LiveView tokens, and the values upstream shipped for development are
+    # in a public repository.
     # ---------------------------------------------------------------------
-    secret="$(grep -E '^SWARM_EXPLORER_SECRET_KEY_BASE=' .env | cut -d= -f2- | tr -d '\r')"
-    [ -n "${secret}" ] || die 'SWARM_EXPLORER_SECRET_KEY_BASE is empty in .env.
-  Generate one on this machine and leave it only there:
-      openssl rand -base64 64'
-    [ "${#secret}" -ge 64 ] \
-        || die "SWARM_EXPLORER_SECRET_KEY_BASE is ${#secret} characters; Phoenix wants 64 or more."
-    [ "${secret}" != "rVfb1mphofjIChVV5RIHW32JxP+aNNOGR4TaOrFSmEPhywkGmPjNHHj6QKCnMxDq" ] \
-        || die 'SWARM_EXPLORER_SECRET_KEY_BASE is the value upstream ships for development.
-  Generate a fresh one:  openssl rand -base64 64'
-    printf 'secret_key_base is set, long enough, and not the development value\n'
+    for name in SWARM_EXPLORER_SECRET_KEY_BASE \
+                SWARM_EXPLORER_SESSION_SIGNING_SALT \
+                SWARM_EXPLORER_LIVE_VIEW_SIGNING_SALT; do
+        value="$(grep -E "^${name}=" .env | cut -d= -f2- | tr -d '\r')"
+        [ -n "${value}" ] || die "${name} is empty in .env.
+  The explorer needs three separate secrets and refuses to boot without them.
+  Generate each on this machine, and leave them only here:
+      openssl rand -base64 48"
+        [ "${#value}" -ge 32 ] \
+            || die "${name} is ${#value} characters; generate one with: openssl rand -base64 48"
+    done
+    printf 'all three explorer secrets are set\n'
 
-    # The LiveView signing salt is compiled into the release, so it cannot be
-    # set from the environment. Look for it in the image and refuse.
+    # And the image must carry none of them as compile-time configuration.
+    # Checking for the KEY NAMES rather than for a known-bad value is the
+    # stronger statement: a different hardcoded salt would pass a value check.
+    # Key names are stored as text in sys.config; the values are byte lists,
+    # which is why searching for a value gives a false negative. WS-D's
+    # ci/check-release-secrets.py --forbid-key makes the same assertion.
     image="$(grep -E '^SWARM_EXPLORER_IMAGE=' .env | cut -d= -f2- | tr -d '\r')"
     if [ -n "${image}" ]; then
         release_config="$(docker run --rm --entrypoint sh "${image}" -c \
             'find /app/releases -name sys.config 2>/dev/null | head -n 1' 2>/dev/null || true)"
-        if [ -n "${release_config}" ] \
-           && docker run --rm --entrypoint grep "${image}" -qa '97,52,108,115,115,57,43,118,90,81,72,79,120,69,114,84,122,120,106,78,85,52,73,117,104,65,97,115,108,69,48,90' "${release_config}" \
-                2>/dev/null; then
-            die "the explorer image carries upstream's development LiveView signing salt.
-  It is compiled in (config/config.exs) and nothing reads an environment
-  variable for it, so it cannot be replaced from this machine. The explorer
-  workstream needs runtime.exs to read one - LIVE_VIEW_SIGNING_SALT, say - and
-  a rebuilt image.
-
-  This is defence in depth rather than an open door: with a unique
-  secret_key_base the salt is a key-derivation input, not a secret by itself.
-  It is still not something to publish with."
+        if [ -z "${release_config}" ]; then
+            die "cannot find sys.config in ${image}; refusing to publish an image I cannot check"
         fi
-        printf 'the image does not carry the development signing salt\n'
+        for key in secret_key_base signing_salt encryption_salt; do
+            if docker run --rm --entrypoint grep "${image}" -qa "${key}" "${release_config}" \
+                    2>/dev/null; then
+                die "the explorer image has '${key}' as compile-time configuration in
+  ${release_config}. Phoenix secrets must come from the environment at boot, or
+  whatever value is baked in is published with the image. The explorer
+  workstream's ci/check-release-secrets.py --forbid-key makes this check too."
+            fi
+        done
+        printf 'the image carries no compile-time Phoenix secret\n'
     fi
 
     # getent exits 2 when the name does not resolve, which under `set -e` would

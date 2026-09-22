@@ -301,7 +301,11 @@ services:
       # Phoenix refuses to start without a long secret, and LiveView's origin
       # check is derived from the hostname - if it is not exactly the name
       # Caddy serves, pages load and the live tiles silently never connect.
-      SECRET_KEY_BASE: ${SWARM_EXPLORER_SECRET_KEY_BASE:-set-me-openssl-rand-base64-64}
+      # Three separate secrets, each generated on the server and living only in
+      # its 0600 .env. The image raises at boot if any is missing or empty.
+      SECRET_KEY_BASE: ${SWARM_EXPLORER_SECRET_KEY_BASE:-}
+      SESSION_SIGNING_SALT: ${SWARM_EXPLORER_SESSION_SIGNING_SALT:-}
+      LIVE_VIEW_SIGNING_SALT: ${SWARM_EXPLORER_LIVE_VIEW_SIGNING_SALT:-}
       EXPLORER_HOSTNAME: ${SWARM_EXPLORE_DOMAIN:-explore.invalid}
       EXPLORER_SCHEME: ${SWARM_EXPLORER_SCHEME:-https}
       EXPLORER_PORT: ${SWARM_EXPLORER_PUBLIC_PORT:-443}
