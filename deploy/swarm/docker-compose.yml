@@ -145,6 +145,13 @@ services:
       SWARM_COOKIE_MISSING_GRACE_SECONDS: ${SWARM_COOKIE_MISSING_GRACE_SECONDS:-120}
       RUST_LOG: ${SWARM_ZAINO_LOG:-info,reqwest=warn,hyper_util=warn}
       RUST_BACKTRACE: ${RUST_BACKTRACE:-1}
+      # Server defect S-1: on 2026-09-22T01:24:55Z a tokio worker overflowed
+      # its stack under real wallet traffic and the process aborted. Rust sizes
+      # spawned threads from RUST_MIN_STACK, so this raises every tokio worker
+      # from the 2 MiB default. It is a mitigation, not a fix - it buys depth,
+      # it does not remove whatever recursed - and it costs address space, not
+      # resident memory, because thread stacks are allocated lazily.
+      RUST_MIN_STACK: ${SWARM_ZAINO_MIN_STACK:-16777216}
     volumes:
       - zaino:/swarm/data
       - auth:/swarm/auth:ro
