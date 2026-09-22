@@ -49,13 +49,39 @@
 {$SWARM_LWD_DOMAIN} {
 	import swarm_hsts
 
-	reverse_proxy h2c://zaino:{$SWARM_ZAINO_GRPC_PORT} {
-		transport http {
-			versions h2c 2
+	# The public network status, as a static file. It is regenerated every 30
+	# seconds by the `status` service and served from a read-only mount, so
+	# this path cannot reach the node, the indexer or anything else - the worst
+	# a bug here can serve is a stale copy of facts that are already public.
+	#
+	# Two origins may read it from a browser: the website and its www form.
+	# The allowed origin is echoed rather than wildcarded, so the header names
+	# exactly who may read it, and `Vary: Origin` keeps a cache from handing
+	# one origin's response to another.
+	handle /status.json {
+		root * /srv/public
+		@swarm header Origin https://swarm.green
+		@www header Origin https://www.swarm.green
+		header {
+			Cache-Control "public, max-age=15"
+			Vary "Origin"
+			Content-Type "application/json; charset=utf-8"
 		}
-		# Light wallets hold GetBlockRange and mempool streams open for a long
-		# time, and buffering a stream would break them.
-		flush_interval -1
+		header @swarm Access-Control-Allow-Origin "https://swarm.green"
+		header @www Access-Control-Allow-Origin "https://www.swarm.green"
+		file_server
+	}
+
+	# Everything else on this name is the light-wallet gRPC service.
+	handle {
+		reverse_proxy h2c://zaino:{$SWARM_ZAINO_GRPC_PORT} {
+			transport http {
+				versions h2c 2
+			}
+			# Light wallets hold GetBlockRange and mempool streams open for a
+			# long time, and buffering a stream would break them.
+			flush_interval -1
+		}
 	}
 }
 

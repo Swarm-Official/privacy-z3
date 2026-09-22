@@ -127,6 +127,46 @@ services:
           cpus: "${SWARM_OPS_CPUS:-0.5}"
           memory: ${SWARM_OPS_MEMORY:-128m}
 
+  # Regenerates the public status.json every 30 seconds from the node's RPC on
+  # the internal network. Caddy serves the file; this never speaks to the
+  # internet itself, and what it writes is only ever facts anyone with the
+  # chain could derive - never the RPC cookie, never an internal address.
+  status:
+    build:
+      context: .
+      dockerfile: images/ops/Dockerfile
+    image: ${SWARM_OPS_IMAGE:-swarm-ops:local}
+    hostname: status
+    restart: unless-stopped
+    <<: [*hardening]
+    logging: *logging
+    command: ["swarm-status-json", "--out", "/swarm/public/status.json", "--loop"]
+    environment:
+      SWARM_ZEBRA_RPC: zebra:${SWARM_RPC_PORT:-18232}
+      SWARM_ZAINO_GRPC: zaino:${SWARM_ZAINO_GRPC_PORT:-8137}
+      SWARM_EXPLORER_HEALTH: http://explorer:${SWARM_EXPLORER_PORT:-4000}/healthz
+      SWARM_STATUS_INTERVAL: ${SWARM_STATUS_INTERVAL:-30}
+    volumes:
+      - auth:/swarm/auth:ro
+      - public:/swarm/public
+      - ${SWARM_CONFIG_DIR:-./config/live}:/swarm/config:ro
+    depends_on:
+      zebra:
+        condition: service_healthy
+    healthcheck:
+      # Healthy means the file exists and is younger than four intervals; a
+      # generator that is running but stuck is not healthy.
+      test: ["CMD-SHELL", "test -s /swarm/public/status.json && find /swarm/public/status.json -newermt '-120 seconds' | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "${SWARM_STATUS_CPUS:-0.25}"
+          memory: ${SWARM_STATUS_MEMORY:-128m}
+
   zaino:
     build:
       context: .
@@ -201,6 +241,8 @@ services:
       SWARM_HSTS_MAX_AGE: ${SWARM_HSTS_MAX_AGE:-31536000}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Read-only: the proxy serves the status file, it does not write it.
+      - public:/srv/public:ro
       - caddy_data:/data
       - caddy_config:/config
     ports:
@@ -329,6 +371,10 @@ volumes:
   # images/zaino/entrypoint.sh for how the indexer follows the rotation.
   auth:
     name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-auth
+  # The one directory whose contents are served to the internet as files.
+  # Written by the status service, read-only everywhere else.
+  public:
+    name: ${COMPOSE_PROJECT_NAME:-swarm-testnet}-public
   # Issued certificates and ACME account keys. Losing this only forces a
   # re-issue, but rate limits make that worth keeping.
   caddy_data:

@@ -30,13 +30,14 @@ RUN apt-get -o Acquire::Retries=3 update \
 RUN groupadd --gid "${SWARM_GID}" swarm \
     && useradd --uid "${SWARM_UID}" --gid "${SWARM_GID}" \
         --home-dir /swarm --no-create-home --shell /usr/sbin/nologin swarm \
-    && mkdir -p /swarm/auth /swarm/config \
+    && mkdir -p /swarm/auth /swarm/config /swarm/public \
     && chown -R "${SWARM_UID}:${SWARM_GID}" /swarm
 
 COPY --chmod=0755 images/ops/rpc.sh /usr/local/bin/swarm-rpc
 COPY --chmod=0755 images/ops/init-genesis.sh /usr/local/bin/swarm-init-genesis
 COPY --chmod=0755 images/ops/lightd-info.sh /usr/local/bin/swarm-lightd-info
 COPY --chmod=0755 images/ops/lightd_info_decode.py /usr/local/bin/swarm-lightd-decode
+COPY --chmod=0755 images/ops/status-json.py /usr/local/bin/swarm-status-json
 
 USER swarm
 WORKDIR /swarm

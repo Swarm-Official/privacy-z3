@@ -124,10 +124,33 @@ status)
   height      \(.block_height)
   vendor      \(.vendor)
   version     \(.version)"' 2>/dev/null || printf '  the indexer did not answer\n'
+    printf '\n== public status endpoint ==\n'
+    if summary="$(compose run --rm --no-deps -T --entrypoint cat status /swarm/public/status.json 2>/dev/null)"; then
+        jq -r '"  generated   \(.server_time_utc)
+  healthy     \(.healthy)
+  spacing     \(.node.mean_interval_last_20_seconds)s over 20 blocks, \(.node.mean_interval_last_100_seconds)s over 100"' \
+            <<<"${summary}" 2>/dev/null || printf '  status.json is not readable JSON\n'
+    else
+        printf '  status.json has not been generated yet\n'
+    fi
+
     printf '\n== containers ==\n'
     docker stats --no-stream --format '  {{.Name}}  cpu {{.CPUPerc}}  mem {{.MemUsage}}' 2>/dev/null \
         | grep -E "$(basename "${stack_dir}")|${project}" || \
         docker stats --no-stream --format '  {{.Name}}  cpu {{.CPUPerc}}  mem {{.MemUsage}}' 2>/dev/null
+    # The one number that says something crashed while nobody was looking.
+    printf '\n== restarts ==\n'
+    for service in zebra zaino explorer caddy status; do
+        id="$(compose ps -aq "${service}" 2>/dev/null | head -n 1)"
+        [ -n "${id}" ] || continue
+        count="$(docker inspect -f '{{.RestartCount}}' "${id}" 2>/dev/null || echo '?')"
+        if [ "${count}" = "0" ] || [ "${count}" = "?" ]; then
+            printf '  %-9s %s\n' "${service}" "${count}"
+        else
+            printf '  %-9s %s   <- it restarted; check the logs\n' "${service}" "${count}"
+        fi
+    done
+
     printf '\n== host ==\n'
     printf '  uptime %s\n' "$(uptime -p 2>/dev/null || true)"
     free -m | awk '/^Mem:|^Swap:/ {printf "  %-6s %5s MB total %5s MB used\n", $1, $2, $3}'
