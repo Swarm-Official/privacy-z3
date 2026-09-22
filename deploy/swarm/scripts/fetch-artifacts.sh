@@ -42,6 +42,20 @@ gh auth status >/dev/null 2>&1 || die 'the GitHub CLI is not authenticated'
 
 mkdir -p "${OUT}"
 
+# `gh` is a native Windows binary under Git Bash, and MSYS_NO_PATHCONV (set
+# above so ssh sees remote paths verbatim) stops the shell translating POSIX
+# paths for it. Handed /c/Users/..., it writes to C:\c\Users\... instead -
+# silently, so every later check looks at an empty directory and concludes the
+# download failed. Hand it a native path when there is one to hand.
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+OUT_NATIVE="$(native_path "${OUT}")"
+
 latest_run() {
     local repo="$1" workflow="$2"
     gh run list -R "${repo}" --workflow "${workflow}" --status success \
@@ -60,7 +74,7 @@ images)
     # download is retried and then verified rather than trusted.
     attempt=1
     until [ "${attempt}" -gt "${SWARM_FETCH_ATTEMPTS:-4}" ]; do
-        gh run download "${run}" -R "${Z3_REPO}" -n swarm-images-x86_64-linux -D "${OUT}" || true
+        gh run download "${run}" -R "${Z3_REPO}" -n swarm-images-x86_64-linux -D "${OUT_NATIVE}" || true
         if [ -r "${OUT}/SHA256SUMS" ] && ( cd "${OUT}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); then
             break
         fi
@@ -86,10 +100,10 @@ binaries)
 
     printf 'downloading zebrad from %s run %s\n' "${ZEBRA_REPO}" "${zebra_run}"
     gh run download "${zebra_run}" -R "${ZEBRA_REPO}" \
-        -n swarm-zebrad-x86_64-unknown-linux-gnu -D "${work}/zebra"
+        -n swarm-zebrad-x86_64-unknown-linux-gnu -D "$(native_path "${work}/zebra")"
     printf 'downloading zainod from %s run %s\n' "${ZAINO_REPO}" "${zaino_run}"
     gh run download "${zaino_run}" -R "${ZAINO_REPO}" \
-        -n swarm-zainod-x86_64-unknown-linux-gnu -D "${work}/zaino"
+        -n swarm-zainod-x86_64-unknown-linux-gnu -D "$(native_path "${work}/zaino")"
 
     mkdir -p "${OUT}/bin"
     for component in zebra zaino; do
