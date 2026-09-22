@@ -319,7 +319,11 @@ services:
       EXPLORER_PORT: ${SWARM_EXPLORER_PUBLIC_PORT:-443}
       PORT: ${SWARM_EXPLORER_PORT:-4000}
       # Upstream shipped with debug on and filled 7.2 GB of container log.
-      LOG_LEVEL: ${SWARM_EXPLORER_LOG:-info}
+      # `warning` by default: at `info` Phoenix logs the request path, and
+      # /address/<taddr> is a record of what somebody looked up. See
+      # .env.example for how to raise it while debugging, and how to put it
+      # back.
+      LOG_LEVEL: ${SWARM_EXPLORER_LOG:-warning}
 
       # It reads the node's JSON-RPC directly, with the same cookie the indexer
       # uses, mounted read-only. It re-reads the cookie after an authentication

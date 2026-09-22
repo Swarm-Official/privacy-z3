@@ -27,6 +27,33 @@
 		# path nothing here uses.
 		protocols h1 h2
 	}
+
+	# No access log is configured anywhere in this file, and that used to be
+	# taken as "this server does not record who connects to it". It was not
+	# true. Caddy's own runtime log attaches the full request object to some
+	# entries, and the commonest of those by a wide margin is
+	#
+	#   warn http.handlers.reverse_proxy "aborting with incomplete response"
+	#
+	# which fires every time a light wallet cancels a GetBlockRange or
+	# GetMempoolStream - constantly, in normal use. On 2026-09-22 that was 324
+	# of the 412 lines being kept, each carrying the wallet's IP address.
+	#
+	# These four deletions take the address out and leave the diagnosis in:
+	# upstream, method, host, uri, status, duration and the error itself all
+	# survive, so a broken proxy is still debuggable. Verified against
+	# caddy:2.11-alpine on exactly that entry type before it was applied.
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>remote_ip delete
+				request>client_ip delete
+				request>remote_port delete
+				request>headers>X-Forwarded-For delete
+			}
+		}
+	}
 }
 
 # max-age only. No includeSubDomains, because the apex and the other
