@@ -149,6 +149,21 @@ status)
         printf '  (a leftover `docker run` costs CPU on a 2-vCPU box; remove it when done)\n'
     fi
 
+    printf '\n== backups ==\n'
+    newest="$(ls -1t "${backup_dir}/${project}-chain-"*.tar.gz 2>/dev/null | head -n 1)"
+    if [ -z "${newest}" ]; then
+        printf '  none yet\n'
+    else
+        age=$(( ( $(date +%s) - $(stat -c %Y "${newest}") ) / 3600 ))
+        count="$(ls -1 "${backup_dir}/${project}-chain-"*.tar.gz 2>/dev/null | wc -l)"
+        printf '  newest    %s, %sh old\n' "$(basename "${newest}")" "${age}"
+        printf '  kept      %s chain archive(s), %s\n' "${count}" \
+            "$(du -sh "${backup_dir}" 2>/dev/null | cut -f1)"
+        # A nightly timer that has stopped looks exactly like one that has not,
+        # until someone needs the archive.
+        [ "${age}" -le 48 ] || printf '  the newest backup is over two days old; is the timer running?\n'
+    fi
+
     # The one number that says something crashed while nobody was looking.
     printf '\n== restarts ==\n'
     for service in zebra zaino explorer caddy status; do
@@ -231,22 +246,66 @@ update-binary)
     ;;
 
 backup)
+    # Only the two services holding databases open have to stop. Caddy, the
+    # status file and the explorer keep serving; the explorer reads the node,
+    # so it reports the node down for the window and recovers by itself.
     name="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
     mkdir -p "${backup_dir}"
-    printf 'stopping the stack so the databases are archived at rest\n'
-    compose stop
+
+    printf 'stopping zebra and zaino so their databases are archived at rest\n'
+    outage_start=$(date +%s)
+    compose stop zebra zaino
+
     for volume in chain zaino; do
         archive="${backup_dir}/${project}-${volume}-${name}.tar.gz"
-        printf 'archiving %s-%s -> %s\n' "${project}" "${volume}" "${archive}"
         docker run --rm \
             -v "${project}-${volume}:/source:ro" \
             -v "${backup_dir}:/backup" \
             alpine:3 tar -czf "/backup/$(basename "${archive}")" -C /source .
     done
-    stack_start
-    ls -lh "${backup_dir}" | sed 's/^/  /'
-    printf '\nCopy these off the server. A backup that lives only on the machine\n'
-    printf 'it backs up is not a backup.\n'
+
+    # Straight back up, not through stack_start: the genesis job has nothing to
+    # do on a database that already has its genesis, and running it here would
+    # add seconds to an outage this is trying to keep short.
+    compose up -d --wait --wait-timeout "${SWARM_WAIT_TIMEOUT:-600}" zebra zaino
+    outage_end=$(date +%s)
+    printf 'outage: %s seconds\n' "$(( outage_end - outage_start ))"
+
+    ( cd "${backup_dir}" && sha256sum "${project}"-*-"${name}".tar.gz > "${project}-${name}.sha256" )
+    printf '\narchives:\n'
+    ls -lh "${backup_dir}"/*"${name}"* | sed 's/^/  /'
+    cat "${backup_dir}/${project}-${name}.sha256" | sed 's/^/  /'
+
+    # Rotation. Weeklies are the ones taken on SWARM_BACKUP_WEEKLY_DAY (default
+    # Sunday); everything else is a daily. Keeping both means a bad state that
+    # goes unnoticed for a week is still recoverable.
+    keep_daily="${SWARM_BACKUP_KEEP_DAILY:-7}"
+    keep_weekly="${SWARM_BACKUP_KEEP_WEEKLY:-4}"
+    weekly_day="${SWARM_BACKUP_WEEKLY_DAY:-7}"
+    for volume in chain zaino; do
+        dailies=""
+        weeklies=""
+        for f in $(ls -1 "${backup_dir}/${project}-${volume}-"*.tar.gz 2>/dev/null | sort -r); do
+            stamp="$(basename "${f}" .tar.gz | sed "s/^${project}-${volume}-//")"
+            day="$(date -u -d "${stamp%T*}" +%u 2>/dev/null || echo 0)"
+            if [ "${day}" = "${weekly_day}" ]; then
+                weeklies="${weeklies} ${f}"
+            else
+                dailies="${dailies} ${f}"
+            fi
+        done
+        # shellcheck disable=SC2086
+        for f in $(printf '%s\n' ${dailies} | tail -n +$(( keep_daily + 1 ))); do
+            printf 'rotating out %s\n' "$(basename "${f}")"; rm -f "${f}"
+        done
+        # shellcheck disable=SC2086
+        for f in $(printf '%s\n' ${weeklies} | tail -n +$(( keep_weekly + 1 ))); do
+            printf 'rotating out %s\n' "$(basename "${f}")"; rm -f "${f}"
+        done
+    done
+
+    printf '\nThese live on the machine they back up, which is not yet a backup.\n'
+    printf 'Copying them off the server is the owner\047s decision.\n'
     ;;
 
 restore)
