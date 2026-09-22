@@ -229,6 +229,12 @@ if [ -n "${BINARIES_DIR}" ]; then
 set -euo pipefail
 cd "${SWARM_REMOTE_DIR}"
 docker compose --env-file .env build zebra zaino init-genesis
+# The binaries have been baked into the images; the loose copies would be a
+# second answer to "what is running", and after the next image update they
+# would be the wrong one. An audit read a stale copy here once already.
+rm -rf "${SWARM_REMOTE_DIR}/bin"
+printf 'removed the staging copies; the binaries now live only in the images
+'
 REMOTE
 fi
 
