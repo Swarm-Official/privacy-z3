@@ -29,19 +29,143 @@ import base64
 import datetime
 import json
 import os
+import re
 import socket
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
+try:
+    import maxminddb  # the IP-to-city reader; the image carries the database
+except ImportError:  # without it, status.json still works; the live map degrades
+    maxminddb = None
+
 COOKIE = os.environ.get("SWARM_COOKIE_FILE", "/swarm/auth/.cookie")
 ZEBRA_RPC = os.environ.get("SWARM_ZEBRA_RPC", "zebra:18232")
 ZAINO_GRPC = os.environ.get("SWARM_ZAINO_GRPC", "zaino:9067")
 EXPLORER = os.environ.get("SWARM_EXPLORER_HEALTH", "http://explorer:4000/healthz")
 CONFIG_DIR = Path(os.environ.get("SWARM_CONFIG_DIR", "/swarm/config"))
+GEOIP_DB = os.environ.get("SWARM_GEOIP_DB", "/swarm/geo/city.mmdb")
 
 SERVICE = "/cash.z.wallet.sdk.rpc.CompactTxStreamer"
+
+# The seed node itself. Its city is already public (swarm.green/data/swarm-map.json)
+# and matches GeoIP of the server's own address, so it is a constant here rather
+# than a lookup, and the live map and the published map cannot drift apart.
+SEED_PLACE = {"city": "Dallas", "country": "US", "lon": -96.80, "lat": 32.78, "seed": True}
+
+# getpeerinfo addresses look like "1.2.3.4:8333" or "[2001:db8::1]:8333".
+_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+")
+
+
+def geo_reader():
+    """Open the IP-to-city database, or None where it is absent."""
+    if maxminddb is None:
+        return None
+    try:
+        return maxminddb.open_database(GEOIP_DB)
+    except Exception:
+        return None
+
+
+def ip_from_addr(addr):
+    """The host part of a getpeerinfo `addr`, or None if it has none."""
+    if not isinstance(addr, str) or not addr:
+        return None
+    host = addr.rsplit(":", 1)[0]
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if _IP_RE.match(host):
+        return host
+    return None
+
+
+def place_for_ip(reader, ip):
+    """City/… for one IP, rounded to city level, or None. The IP is not kept."""
+    if reader is None or not ip:
+        return None
+    try:
+        record = reader.get(ip)
+    except Exception:
+        return None
+    if not record:
+        return None
+    city = ((record.get("city") or {}).get("names") or {}).get("en") or ""
+    country = ((record.get("country") or {}).get("iso_code")) or ""
+    location = record.get("location") or {}
+    lat = location.get("latitude")
+    lon = location.get("longitude")
+    if not city or lat is None or lon is None:
+        return None
+    return {
+        "city": city[:80],
+        "country": country[:8],
+        "lon": round(float(lon), 2),
+        "lat": round(float(lat), 2),
+    }
+
+
+def places_from_peers(peers, reader):
+    """Aggregate connected peers by city. IPs are read and never held on to."""
+    by_city = {}
+    for peer in peers or []:
+        place = place_for_ip(reader, ip_from_addr(peer.get("addr")))
+        if place is None:
+            continue
+        key = f"{place['city']}|{place['country']}"
+        if key not in by_city:
+            by_city[key] = {**place, "count": 1}
+        else:
+            by_city[key]["count"] += 1
+    return sorted(by_city.values(), key=lambda p: (-p["count"], p["city"]))
+
+
+def build_map_live(peers, reader, server_time_utc):
+    """The live heat-map file: the seed plus every currently connected node.
+
+    This is the honest answer to "show the nodes that are live": a connection to
+    the seed is the only thing the network itself proves about a node, so "live"
+    means "connected to the seed right now", and a node that dropped vanishes
+    with it. Cities come from an offline IP-to-city lookup and never finer than a
+    city; no address is written to the file or anywhere else.
+    """
+    geoip = reader is not None
+    peer_places = places_from_peers(peers, reader) if geoip else []
+
+    # The seed joins the same aggregation, so a peer in the seed's own city
+    # adds to one dot instead of drawing the city twice. The seed stays first.
+    seed_match = next(
+        (p for p in peer_places
+         if (p["city"], p["country"]) == (SEED_PLACE["city"], SEED_PLACE["country"])),
+        None,
+    )
+    if seed_match is not None:
+        seed_match["count"] += 1
+        seed_match["seed"] = True
+        places = peer_places
+        places.sort(key=lambda p: (not p.get("seed"), -p["count"], p["city"]))
+    else:
+        places = [dict(SEED_PLACE, count=1)] + peer_places
+
+    online = 1 + len(peers or [])
+    note = (
+        "Nodes whose full node is connected to the seed right now. City level "
+        "only, from an offline IP-to-city database; no address is stored."
+    )
+    if not geoip:
+        note = ("Nodes whose full node is connected to the seed right now. The "
+                "city database is not installed, so only the seed is placed.")
+    return {
+        "schema": "swarm-map-live/1",
+        "updated": server_time_utc,
+        "generated_unix": int(time.time()),
+        "live": True,
+        "nodes_online": online,
+        "geoip": geoip,
+        "note": note,
+        "places": places,
+    }
 
 
 def utc(timestamp: float | int) -> str:
@@ -187,6 +311,14 @@ def build() -> dict:
     return status
 
 
+def write_atomic(path: Path, data: dict) -> None:
+    """Atomic: a reader never sees a half-written file."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    os.chmod(path, 0o644)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
@@ -196,10 +328,12 @@ def main() -> int:
 
     interval = int(os.environ.get("SWARM_STATUS_INTERVAL", "30"))
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    map_out = args.out.with_name("swarm-map-live.json")
 
     while True:
         try:
             status = build()
+            server_time = status.get("server_time_utc") or utc(time.time())
         except Exception as error:  # never let one bad read stop the loop
             status = {
                 "schema": "swarm-network-status/1",
@@ -207,11 +341,28 @@ def main() -> int:
                 "healthy": False,
                 "error": type(error).__name__,
             }
-        # Atomic: a reader never sees a half-written file.
-        temporary = args.out.with_suffix(args.out.suffix + ".tmp")
-        temporary.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, args.out)
-        os.chmod(args.out, 0o644)
+            server_time = status["server_time_utc"]
+
+        write_atomic(args.out, status)
+
+        # The live map is a second, independent file: whatever state the status
+        # read is in, a peer list that answers must still publish a live count,
+        # and one that does not answer must say so rather than reuse a stale dot
+        # as if it were online.
+        try:
+            peers = rpc("getpeerinfo")
+            map_live = build_map_live(peers, geo_reader(), server_time)
+        except Exception as error:
+            map_live = {
+                "schema": "swarm-map-live/1",
+                "updated": server_time,
+                "live": False,
+                "nodes_online": None,
+                "error": type(error).__name__,
+                "note": "The seed's peer list could not be read.",
+                "places": [dict(SEED_PLACE, count=1)],
+            }
+        write_atomic(map_out, map_live)
 
         if not args.loop:
             print(json.dumps(status, indent=2))

@@ -99,6 +99,24 @@
 		file_server
 	}
 
+	# The live heat map: which nodes are connected RIGHT NOW, at city level.
+	# Written by the same generator, served with a shorter cache because "live"
+	# is the point, and with the same origin allow-list so it cannot become a
+	# wider read surface than status.json. It contains no addresses.
+	handle /swarm-map-live.json {
+		root * /srv/public
+		@swarm header Origin https://swarm.green
+		@www header Origin https://www.swarm.green
+		header {
+			Cache-Control "public, max-age=5"
+			Vary "Origin"
+			Content-Type "application/json; charset=utf-8"
+		}
+		header @swarm Access-Control-Allow-Origin "https://swarm.green"
+		header @www Access-Control-Allow-Origin "https://www.swarm.green"
+		file_server
+	}
+
 	# Everything else on this name is the light-wallet gRPC service.
 	handle {
 		reverse_proxy h2c://zaino:{$SWARM_ZAINO_GRPC_PORT} {
