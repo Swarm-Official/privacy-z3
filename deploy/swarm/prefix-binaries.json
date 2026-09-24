@@ -1,0 +1,17 @@
+{
+  "release_tag": "prefix-binaries-20260924",
+  "binaries": {
+    "zainod": {
+      "sha256": "bed755d8cef961630e2807467278d7fba4d6fabae87d4826171488bab3e7ec5b",
+      "commit": "8fd32cc97dd5cd44338c6d88c1ce4634fbe4993b",
+      "repository": "Swarm-Official/privacy-zaino",
+      "workflow_run": "https://github.com/Swarm-Official/privacy-zaino/actions/runs/35938558928"
+    },
+    "zebrad": {
+      "sha256": "f0a809f6aa8671e7b47c1557d4c524293d9c0e7871648812f6383dc37dfd0896",
+      "commit": "c4e0a4b3772ab81c2c73a183d837ac3ce2ea7c05",
+      "repository": "Swarm-Official/privacy-zebra",
+      "workflow_run": "https://github.com/Swarm-Official/privacy-zebra/actions/runs/35938556704"
+    }
+  }
+}
