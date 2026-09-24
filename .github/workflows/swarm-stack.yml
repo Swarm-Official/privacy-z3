@@ -214,6 +214,9 @@ jobs:
 
   zebrad:
     name: Verified zebrad artifact
+    # GitHub restricts draft release visibility to repository collaborators.
+    permissions:
+      contents: write
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     outputs:
@@ -255,6 +258,8 @@ jobs:
 
   zainod:
     name: Verified zainod artifact
+    permissions:
+      contents: write
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     outputs:
