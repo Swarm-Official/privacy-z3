@@ -9,8 +9,14 @@ response is a five-byte frame around a protobuf message, and protobuf's
 field-tag encoding is stable by definition, so 60 lines here replace both.
 
 It is deliberately partial: fields it does not know are skipped by wire type,
-so a newer server adding fields still decodes. The field numbers come from
-LightdInfo in the lightwallet protocol's service.proto.
+so a newer server adding fields still decodes. Fields 1 to 18 are LightdInfo
+in the lightwallet protocol's service.proto. Field 19, `genesis_hash`, is the
+SWARM addition to that message (privacy-zaino a0f42a41): the hash of the
+chain's height-zero block, which is the one value that proves WHICH chain a
+light server indexes. `chain_name` only labels it, and two chains built from
+the same software answer the same label. A server built before that commit
+sends no field 19, and this decoder then prints no `genesis_hash` key at all;
+read "absent" as "this server did not say", never as "no genesis".
 
 A naive `grep swarm-testnet` over the raw bytes would NOT do: `branch` (field 9)
 is build metadata, and on a build from the `swarm-testnet-support` branch it
@@ -21,7 +27,8 @@ nothing else.
 import json
 import sys
 
-# LightdInfo field numbers, from the lightwallet protocol's service.proto.
+# LightdInfo field numbers, from the lightwallet protocol's service.proto;
+# 19 is the SWARM addition (see the module docstring).
 STRING_FIELDS = {
     1: "version",
     2: "vendor",
@@ -36,6 +43,7 @@ STRING_FIELDS = {
     15: "donation_address",
     16: "upgrade_name",
     18: "lightwallet_protocol_version",
+    19: "genesis_hash",
 }
 VARINT_FIELDS = {
     3: "taddr_support",
