@@ -112,7 +112,12 @@ jobs:
               + string_field(9, "swarm-testnet-support")
               + string_field(18, "v0.5.0")
           )
+          genesis = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd"
+          # Field 19 is the SWARM addition, and 20 stands in for whatever a
+          # future server appends: read, and skipped, respectively.
+          message_new = message + string_field(19, genesis) + string_field(20, "unknown")
           frame = b"\x00" + struct.pack(">I", len(message)) + message
+          frame_new = b"\x00" + struct.pack(">I", len(message_new)) + message_new
 
           decoder = "deploy/swarm/images/ops/lightd_info_decode.py"
           done = subprocess.run([sys.executable, decoder], input=frame, capture_output=True)
@@ -122,6 +127,16 @@ jobs:
           assert fields["branch"] == "swarm-testnet-support", fields
           assert fields["block_height"] == 12345, fields
           assert fields["taddr_support"] is True, fields
+          # A server built before genesis_hash existed sends no field 19, and
+          # that must decode as "not said", not as an empty string.
+          assert "genesis_hash" not in fields, fields
+
+          done = subprocess.run([sys.executable, decoder], input=frame_new, capture_output=True)
+          assert done.returncode == 0, done.stderr.decode()
+          fields = json.loads(done.stdout)
+          assert fields["genesis_hash"] == genesis, fields
+          assert fields["chain_name"] == "swarm-testnet", fields
+          assert not any(v == "unknown" for v in fields.values()), fields
 
           # A compressed frame is refused rather than mis-read.
           done = subprocess.run([sys.executable, decoder],
